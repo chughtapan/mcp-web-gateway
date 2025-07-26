@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license =  {text = "MIT"}
 authors = [
-    { name = "Tapan Chugh" },
+    { name = "Tapan Chugh", email = "chugh.tapan@gmail.com" },
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
