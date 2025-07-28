@@ -191,18 +191,14 @@ class TestFastAPIIntegration:
         resources = await client.list_resources()
         resource_uris = {str(r.uri) for r in resources}
 
-        # Verify resources created with method prefixes
-        assert "http+get://fastapi/items" in resource_uris
-        assert "http+post://fastapi/items" in resource_uris
+        # Verify resources created with plain HTTP URIs (no method prefixes)
+        assert "http://fastapi/items" in resource_uris
 
         # List templates
         templates = await client.list_resource_templates()
         template_uris = {str(t.uriTemplate) for t in templates}
 
-        assert "http+get://fastapi/items/{item_id}" in template_uris
-        assert "http+put://fastapi/items/{item_id}" in template_uris
-        assert "http+patch://fastapi/items/{item_id}" in template_uris
-        assert "http+delete://fastapi/items/{item_id}" in template_uris
+        assert "http://fastapi/items/{item_id}" in template_uris
 
     async def test_only_rest_tools_available(self, gateway_and_client):
         """Test that only REST tools are available."""
@@ -384,37 +380,41 @@ class TestFastAPIIntegration:
         assert "404" in str(exc_info.value)
         assert "Item not found" in str(exc_info.value)
 
-    async def test_method_mismatch_error(self, gateway_and_client):
-        """Test that method mismatch in URL raises error."""
+    async def test_unsupported_method_error(self, gateway_and_client):
+        """Test that using unsupported HTTP method raises error."""
         gateway, client = gateway_and_client
 
-        # Try to use POST tool on a GET resource
+        # Try to use PATCH tool on the root /items resource (which only supports GET and POST)
         with pytest.raises(Exception) as exc_info:
             await client.call_tool(
-                "POST",
-                {"url": "http+get://fastapi/items"},  # GET prefix but using POST tool
+                "PATCH",
+                {"url": "http://fastapi/items"},
             )
 
-        assert "Method mismatch" in str(exc_info.value)
+        assert "Method PATCH not supported" in str(exc_info.value)
 
-    async def test_head_and_options_exposed_as_resources(self, gateway_and_client):
-        """Test that HEAD and OPTIONS endpoints are exposed as resources (not as tools)."""
+    async def test_head_and_options_merged_into_resources(self, gateway_and_client):
+        """Test that HEAD and OPTIONS methods are merged into resources and available in schema."""
         gateway, client = gateway_and_client
 
-        # List all resources
-        resources = await client.list_resources()
-        resource_uris = {str(r.uri) for r in resources}
+        # Read the /items resource to get its schema
+        items_resource_content = await client.read_resource("http://fastapi/items")
 
-        # HEAD and OPTIONS should be exposed as resources
-        head_resources = [uri for uri in resource_uris if "+head://" in uri]
-        options_resources = [uri for uri in resource_uris if "+options://" in uri]
+        # Parse the schema to check available methods
+        import json
 
-        assert len(head_resources) > 0, "HEAD endpoints should be exposed as resources"
-        assert (
-            len(options_resources) > 0
-        ), "OPTIONS endpoints should be exposed as resources"
+        schema = json.loads(items_resource_content[0].text)
 
-        # But they should NOT have corresponding tools
+        # Check that HEAD and OPTIONS methods are included in the schema
+        items_operations = schema["paths"]["/items"]
+
+        # FastAPI automatically adds HEAD for GET endpoints and OPTIONS for all endpoints
+        assert "get" in items_operations, "GET method should be present"
+        assert "post" in items_operations, "POST method should be present"
+        assert "head" in items_operations, "HEAD method should be present"
+        assert "options" in items_operations, "OPTIONS method should be present"
+
+        # But HEAD and OPTIONS should NOT have corresponding tools
         tools = await client.list_tools()
         tool_names = {t.name for t in tools}
 
@@ -576,23 +576,23 @@ class TestFastAPIMethodInvocation:
         assert len(invocations) == 1
         assert invocations[0] == ("POST", "/items")
 
-    async def test_wrong_method_prefix_raises_error(
+    async def test_unsupported_method_raises_error(
         self, gateway_and_client_with_tracking
     ):
-        """Test that mismatched method prefix raises error."""
+        """Test that using unsupported method raises error."""
         gateway, client, tracker = gateway_and_client_with_tracking
         tracker.clear()
 
-        # Try to use GET tool with POST prefix
+        # Try to use PUT tool on /items (which only supports GET and POST)
         with pytest.raises(Exception) as exc_info:
             await client.call_tool(
-                "GET",
-                {"url": "http+post://fastapi/items"},  # POST prefix but using GET tool
+                "PUT",
+                {"url": "http://fastapi/items"},
             )
 
-        # Should not have made any HTTP calls
+        # Should not have made any HTTP calls to the actual endpoint
         assert len(tracker.get_invocations()) == 0
-        assert "Method mismatch" in str(exc_info.value)
+        assert "Method PUT not supported" in str(exc_info.value)
 
     async def test_multiple_requests_tracked_correctly(
         self, gateway_and_client_with_tracking
