@@ -62,6 +62,7 @@ class McpWebGateway(FastMCPOpenAPI):
         openapi_spec: dict[str, Any],
         client: httpx.AsyncClient,
         name: str | None = None,
+        add_rest_tools: bool = True,
         **settings: Any,
     ):
         """Initialize an MCP Web Gateway server from an OpenAPI schema."""
@@ -79,8 +80,9 @@ class McpWebGateway(FastMCPOpenAPI):
             **settings,
         )
 
-        # Add the generic REST tools
-        self._add_rest_tools()
+        # Add the generic REST tools if requested
+        if add_rest_tools:
+            self.add_rest_tools()
 
         logger.info(
             f"Created MCP Web Gateway server with {len(self._resource_manager._resources)} resources "
@@ -98,6 +100,7 @@ class McpWebGateway(FastMCPOpenAPI):
         mcp_names: dict[str, str] | None = None,
         httpx_client_kwargs: dict[str, Any] | None = None,
         tags: set[str] | None = None,
+        add_rest_tools: bool = True,
         **settings: Any,
     ) -> "McpWebGateway":
         """Create an MCP Web Gateway from a FastAPI application.
@@ -114,6 +117,7 @@ class McpWebGateway(FastMCPOpenAPI):
             mcp_names: Optional mapping of operation IDs to custom names
             httpx_client_kwargs: Optional kwargs for httpx.AsyncClient
             tags: Optional tags to add to all components
+            add_rest_tools: Whether to automatically add REST tools (default True)
             **settings: Additional settings passed to McpWebGateway
 
         Returns:
@@ -152,6 +156,7 @@ class McpWebGateway(FastMCPOpenAPI):
             name=name,
             tags=tags,
             mcp_names=mcp_names,
+            add_rest_tools=add_rest_tools,
             **settings,
         )
 
@@ -295,7 +300,7 @@ class McpWebGateway(FastMCPOpenAPI):
                 f"Registered Web Template: {uri_template} ({route.method} {route.path})"
             )
 
-    def _add_rest_tools(self) -> None:
+    def add_rest_tools(self) -> None:
         """Add the generic REST tools to the server."""
 
         async def execute_request(

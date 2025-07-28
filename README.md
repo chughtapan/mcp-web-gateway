@@ -81,7 +81,7 @@ with open("openapi.json") as f:
 client = httpx.AsyncClient(base_url="https://api.example.com")
 
 # Create gateway server
-gateway = McpWebGateway(openapi_spec, client)
+mcp = McpWebGateway(openapi_spec, client)
 
 # The gateway is now ready to be used by MCP clients!
 ```
@@ -155,6 +155,24 @@ The `agent/instructions.md` file contains an initial set of instructions for LLM
 - Handle errors gracefully and learn from API responses
 
 ## Advanced Usage
+
+### Adding Custom Tools
+
+By default, the gateway automatically adds REST tools (GET, POST, PUT, PATCH, DELETE). You can disable this and add your own custom tools:
+
+```python
+# Create gateway without default REST tools
+mcp = McpWebGateway(openapi_spec, client, add_rest_tools=False)
+
+# Add your own custom tools
+@mcp.tool(name="custom_search")
+async def custom_search(query: str) -> dict:
+    # Your custom implementation
+    return {"results": []}
+
+# Optionally add the default REST tools later
+mcp.add_rest_tools()
+```
 
 ### Custom HTTP Client Configuration
 

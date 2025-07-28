@@ -108,7 +108,7 @@ class TestMcpWebGateway:
         tools = await server.get_tools()
         tool_names = list(tools.keys())
 
-        # Should only have the 5 REST tools
+        # Should only have the 5 REST tools (default behavior)
         assert len(tool_names) == 5
         assert set(tool_names) == {"GET", "POST", "PUT", "PATCH", "DELETE"}
 
@@ -118,6 +118,35 @@ class TestMcpWebGateway:
         assert "get_pet" not in tool_names
         assert "update_pet" not in tool_names
         assert "delete_pet" not in tool_names
+
+    async def test_no_rest_tools_when_disabled(self, petstore_openapi_spec):
+        """Test that REST tools are not created when add_rest_tools=False."""
+        client = httpx.AsyncClient(base_url="https://petstore.example.com/api")
+        server = McpWebGateway(petstore_openapi_spec, client, add_rest_tools=False)
+
+        tools = await server.get_tools()
+        tool_names = list(tools.keys())
+
+        # Should have no tools at all
+        assert len(tool_names) == 0
+
+    async def test_explicit_add_rest_tools(self, petstore_openapi_spec):
+        """Test that add_rest_tools() method works when called explicitly."""
+        client = httpx.AsyncClient(base_url="https://petstore.example.com/api")
+        server = McpWebGateway(petstore_openapi_spec, client, add_rest_tools=False)
+
+        # Initially no tools
+        tools = await server.get_tools()
+        assert len(tools) == 0
+
+        # Add REST tools explicitly
+        server.add_rest_tools()
+
+        # Now should have the 5 REST tools
+        tools = await server.get_tools()
+        tool_names = list(tools.keys())
+        assert len(tool_names) == 5
+        assert set(tool_names) == {"GET", "POST", "PUT", "PATCH", "DELETE"}
 
     async def test_get_tool_execution(self, petstore_openapi_spec):
         """Test executing a GET request through the GET tool."""
