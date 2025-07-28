@@ -2,10 +2,30 @@
          
 The MCP Web Gateway enables AI Agents to connect Web Services by accessing API directly.
 
-- **All HTTP endpoints** are exposed as MCP resources with their original HTTP URLs.
+- **All HTTP endpoints** are exposed as MCP resources with their original HTTP URLs
 - **Generic REST tools** (GET, POST, PUT, PATCH, DELETE) are provided for executing requests
+- **Resources are readable** - they return OpenAPI schema showing all available HTTP methods
+- **One resource per path** - all HTTP methods for a path are grouped into a single resource
 
-This design changes the abstraction for the developers: instead of writing MCP servers, they write Web APIs using familiar REST semantics. 
+This design changes the abstraction for the developers: instead of writing MCP servers, they write Web APIs using familiar REST semantics.
+
+## How It Works
+
+1. **Resource Discovery**: Each unique API path becomes a resource with a plain HTTP URL
+   - `/users` → `https://api.example.com/users` (supports GET, POST)
+   - `/users/{id}` → `https://api.example.com/users/{id}` (supports GET, PUT, DELETE)
+
+2. **Schema Inspection**: Resources can be read to discover available operations
+   ```python
+   schema = await client.read_resource("https://api.example.com/users")
+   # Returns OpenAPI schema showing which HTTP methods are available
+   ```
+
+3. **Request Execution**: Use generic REST tools to execute requests
+   ```python
+   # The tool validates that the method is supported before executing
+   result = await client.call_tool("GET", {"url": "https://api.example.com/users"})
+   ``` 
 
 ## Installation
 
@@ -46,7 +66,7 @@ mcp = McpWebGateway.from_fastapi(
 )
 ```
 
-### 1. Connecting through OpenAPI specs
+### 2. Connecting through OpenAPI specs
 
 ```python
 from mcp_web_gateway import McpWebGateway
@@ -75,16 +95,20 @@ from fastmcp import Client
 async with Client(gateway) as client:
     # Discover available resources
     resources = await client.list_resources()
-    # Example: ['https+get://api.example.com/users', 'https+post://api.example.com/users']
+    # Example: ['https://api.example.com/users', 'https://api.example.com/users/{id}']
+    
+    # Read a resource to see available methods
+    schema = await client.read_resource("https://api.example.com/users")
+    # Returns OpenAPI schema showing GET and POST are available
     
     # Execute a GET request
     users = await client.call_tool("GET", {
-        "url": "https+get://api.example.com/users"
+        "url": "https://api.example.com/users"
     })
     
     # Execute a POST request
     new_user = await client.call_tool("POST", {
-        "url": "https+post://api.example.com/users",
+        "url": "https://api.example.com/users",
         "body": {"name": "Charlie"}
     })
 ```

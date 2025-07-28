@@ -4,6 +4,7 @@ These components extend the base OpenAPI components to support the web gateway
 approach where resources represent API endpoints but don't execute them directly.
 """
 
+import json
 from typing import Any
 
 import httpx
@@ -16,11 +17,10 @@ from fastmcp.experimental.server.openapi.components import (
 from fastmcp.experimental.utilities.openapi import HTTPRoute
 from fastmcp.experimental.utilities.openapi.director import RequestDirector
 from fastmcp.server import Context
-from mcp.types import Annotations
 
 
 class WebResource(BaseOpenAPIResource):
-    """Resource that represents a web API endpoint but doesn't execute it directly."""
+    """Resource that represents a web API endpoint and returns its OpenAPI schema."""
 
     def __init__(
         self,
@@ -33,9 +33,7 @@ class WebResource(BaseOpenAPIResource):
         mime_type: str = "application/json",
         tags: set[str] = set(),
         timeout: float | None = None,
-        annotations: Annotations | dict[str, Any] | None = None,
     ):
-        # Convert string URI to AnyUrl for parent class
         super().__init__(
             client=client,
             route=route,
@@ -47,19 +45,60 @@ class WebResource(BaseOpenAPIResource):
             tags=tags,
             timeout=timeout,
         )
-        # Store annotations on the resource
-        if isinstance(annotations, dict):
-            annotations = Annotations(**annotations)
-
-        if annotations:
-            self.annotations = annotations
+        # Store all routes for this URL
+        self._routes = [route]
 
     async def read(self) -> str | bytes:
-        """Reading a web resource is not supported - use the appropriate REST tool instead."""
-        raise NotImplementedError(
-            f"This resource represents a {self._route.method} endpoint at {self._route.path}. "
-            f"To execute the request, use the {self._route.method} tool with this resource's URI."
-        )
+        """Return OpenAPI schema for all methods available at this URL."""
+        schema = self._build_openapi_schema(self._routes[0].path)
+        return json.dumps(schema, indent=2)
+
+    def _build_operation_schema(self, route: HTTPRoute) -> dict[str, Any]:
+        """Build OpenAPI operation schema for a single route."""
+        operation: dict[str, Any] = {
+            "operationId": route.operation_id,
+            "summary": route.summary,
+            "description": route.description,
+            "tags": list(route.tags) if route.tags else [],
+        }
+
+        # Add parameters
+        if route.parameters:
+            operation["parameters"] = [p.model_dump() for p in route.parameters]
+
+        # Add request body
+        if route.request_body:
+            operation["requestBody"] = route.request_body.model_dump()
+
+        # Add responses
+        if route.responses:
+            operation["responses"] = {
+                str(code): resp.model_dump() for code, resp in route.responses.items()
+            }
+
+        return operation
+
+    def _build_openapi_schema(self, resource_path: str) -> dict[str, Any]:
+        """Build the complete OpenAPI schema for this resource."""
+        schema: dict[str, Any] = {"openapi": "3.0.0", "paths": {resource_path: {}}}
+
+        # Build operations for each method
+        path_item: dict[str, Any] = schema["paths"][resource_path]
+        for route in self._routes:
+            operation = self._build_operation_schema(route)
+            path_item[route.method.lower()] = operation
+
+        return schema
+
+    def add_route(self, route: HTTPRoute) -> None:
+        """Add a new route to this resource."""
+        # Check if this method already exists
+        existing_methods = {r.method for r in self._routes}
+        if route.method not in existing_methods:
+            self._routes.append(route)
+            # Update tags if the new route has tags
+            if route.tags:
+                self.tags.update(route.tags)
 
 
 class WebResourceTemplate(BaseOpenAPIResourceTemplate):
@@ -76,7 +115,6 @@ class WebResourceTemplate(BaseOpenAPIResourceTemplate):
         parameters: dict[str, Any],
         tags: set[str] = set(),
         timeout: float | None = None,
-        annotations: Annotations | dict[str, Any] | None = None,
     ):
         super().__init__(
             client=client,
@@ -89,12 +127,8 @@ class WebResourceTemplate(BaseOpenAPIResourceTemplate):
             tags=tags,
             timeout=timeout,
         )
-        # Store annotations on the template
-        if isinstance(annotations, dict):
-            annotations = Annotations(**annotations)
-
-        if annotations:
-            self.annotations = annotations
+        # Store all routes for this URL template
+        self._routes = [route]
 
     async def create_resource(
         self,
@@ -108,19 +142,34 @@ class WebResourceTemplate(BaseOpenAPIResourceTemplate):
         for key, value in params.items():
             uri_parts.append(f"{key}={value}")
 
-        # Create and return a web resource
-        return WebResource(
+        # Create a web resource with the first route
+        resource = WebResource(
             client=self._client,
-            route=self._route,
+            route=self._routes[0],
             director=self._director,
             uri=uri,
             name=f"{self.name}-{'-'.join(uri_parts)}",
-            description=self.description or f"Resource for {self._route.path}",
+            description=self.description or f"Resource for {self._routes[0].path}",
             mime_type="application/json",
-            tags=set(self._route.tags or []),
+            tags=set(self._routes[0].tags or []),
             timeout=self._timeout,
-            annotations=self.annotations,  # Pass through the annotations
         )
+
+        # Add remaining routes if any
+        for route in self._routes[1:]:
+            resource.add_route(route)
+
+        return resource
+
+    def add_route(self, route: HTTPRoute) -> None:
+        """Add a new route to this template."""
+        # Check if this method already exists
+        existing_methods = {r.method for r in self._routes}
+        if route.method not in existing_methods:
+            self._routes.append(route)
+            # Update tags if the new route has tags
+            if route.tags:
+                self.tags.update(route.tags)
 
 
 __all__ = [

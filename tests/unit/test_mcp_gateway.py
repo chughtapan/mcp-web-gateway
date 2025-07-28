@@ -1,5 +1,6 @@
 """Comprehensive tests for the MCP Web Gateway."""
 
+import json
 from unittest.mock import AsyncMock, Mock
 
 import httpx
@@ -22,7 +23,7 @@ class TestMcpWebGateway:
             yield server, mcp_client
 
     async def test_resources_created_with_http_uris(self, petstore_openapi_spec):
-        """Test that resources are created with HTTP URIs including method prefix."""
+        """Test that resources are created with plain HTTP URIs."""
         client = httpx.AsyncClient(base_url="https://petstore.example.com/api")
         server = McpWebGateway(petstore_openapi_spec, client)
 
@@ -30,60 +31,74 @@ class TestMcpWebGateway:
         resources = server._resource_manager._resources
         templates = server._resource_manager._templates
 
-        # Should have 2 resources (GET /pets, POST /pets)
-        assert len(resources) == 2
+        # Should have 1 resource for /pets (combining GET and POST)
+        assert len(resources) == 1
 
-        # Should have 3 templates (GET /pets/{petId}, PUT /pets/{petId}, DELETE /pets/{petId})
-        assert len(templates) == 3
+        # Should have 1 template for /pets/{petId} (combining GET, PUT, DELETE)
+        assert len(templates) == 1
 
-        # Check resource URIs have method prefix
-        assert "https+get://petstore.example.com/api/pets" in resources
-        assert "https+post://petstore.example.com/api/pets" in resources
+        # Check resource URIs are plain HTTP URLs
+        assert "https://petstore.example.com/api/pets" in resources
 
-        # Check template URIs have method prefix
-        assert "https+get://petstore.example.com/api/pets/{petId}" in templates
-        assert "https+put://petstore.example.com/api/pets/{petId}" in templates
-        assert "https+delete://petstore.example.com/api/pets/{petId}" in templates
+        # Check template URIs are plain HTTP URLs
+        assert "https://petstore.example.com/api/pets/{petId}" in templates
 
-    async def test_resources_have_annotations(self, petstore_openapi_spec):
-        """Test that resources have proper annotations with HTTP metadata."""
+    async def test_resource_read_returns_schema(self, petstore_openapi_spec):
+        """Test that reading a resource returns OpenAPI schema."""
         client = httpx.AsyncClient(base_url="https://petstore.example.com/api")
         server = McpWebGateway(petstore_openapi_spec, client)
 
-        # Get a GET resource
-        get_pets_resource = server._resource_manager._resources[
-            "https+get://petstore.example.com/api/pets"
+        # Get the /pets resource
+        pets_resource = server._resource_manager._resources[
+            "https://petstore.example.com/api/pets"
         ]
 
-        # Check annotations
-        assert get_pets_resource.annotations is not None
-        assert get_pets_resource.annotations.httpMethod == "GET"
-        assert get_pets_resource.annotations.httpPath == "/pets"
-        assert get_pets_resource.annotations.operationId == "list_pets"
+        # Read the resource
+        schema_json = await pets_resource.read()
+        schema = json.loads(schema_json)
 
-        # Check POST resource
-        post_pets_resource = server._resource_manager._resources[
-            "https+post://petstore.example.com/api/pets"
-        ]
-        assert post_pets_resource.annotations.httpMethod == "POST"
-        assert post_pets_resource.annotations.operationId == "create_pet"
-        assert hasattr(post_pets_resource.annotations, "requestBody")
-        assert hasattr(post_pets_resource.annotations, "responses")
+        # Check schema structure
+        assert "openapi" in schema
+        assert "paths" in schema
+        assert "/pets" in schema["paths"]
 
-    async def test_resource_read_raises_error(self, petstore_openapi_spec):
-        """Test that reading a resource raises NotImplementedError."""
+        # Check that both GET and POST methods are in the schema
+        pets_operations = schema["paths"]["/pets"]
+        assert "get" in pets_operations
+        assert "post" in pets_operations
+
+        # Check GET operation details
+        assert pets_operations["get"]["operationId"] == "list_pets"
+
+        # Check POST operation details
+        assert pets_operations["post"]["operationId"] == "create_pet"
+        assert "requestBody" in pets_operations["post"]
+        assert "responses" in pets_operations["post"]
+
+    async def test_template_read_returns_schema(self, petstore_openapi_spec):
+        """Test that reading a template resource returns OpenAPI schema."""
         client = httpx.AsyncClient(base_url="https://petstore.example.com/api")
         server = McpWebGateway(petstore_openapi_spec, client)
 
-        resource = server._resource_manager._resources[
-            "https+get://petstore.example.com/api/pets"
+        # Get the /pets/{petId} template
+        pet_template = server._resource_manager._templates[
+            "https://petstore.example.com/api/pets/{petId}"
         ]
 
-        with pytest.raises(NotImplementedError) as exc_info:
-            await resource.read()
+        # Create a resource instance
+        pet_resource = await pet_template.create_resource(
+            "https://petstore.example.com/api/pets/123", {"petId": "123"}
+        )
 
-        assert "GET endpoint" in str(exc_info.value)
-        assert "use the GET tool" in str(exc_info.value)
+        # Read the resource
+        schema_json = await pet_resource.read()
+        schema = json.loads(schema_json)
+
+        # Check that all methods are in the schema
+        pet_operations = schema["paths"]["/pets/{petId}"]
+        assert "get" in pet_operations
+        assert "put" in pet_operations
+        assert "delete" in pet_operations
 
     async def test_only_rest_tools_created(self, petstore_openapi_spec):
         """Test that only REST tools are created, no operation-specific tools."""
@@ -126,7 +141,7 @@ class TestMcpWebGateway:
         # Use in-memory client to call the tool
         async with Client(server) as client:
             result = await client.call_tool(
-                "GET", {"url": "https+get://petstore.example.com/api/pets"}
+                "GET", {"url": "https://petstore.example.com/api/pets"}
             )
 
         # Check the request was made correctly
@@ -168,7 +183,7 @@ class TestMcpWebGateway:
             result = await client.call_tool(
                 "POST",
                 {
-                    "url": "https+post://petstore.example.com/api/pets",
+                    "url": "https://petstore.example.com/api/pets",
                     "body": {"name": "Max", "species": "dog", "breed": "Labrador"},
                 },
             )
@@ -184,21 +199,21 @@ class TestMcpWebGateway:
         assert result.structured_content["id"] == 4
         assert result.structured_content["name"] == "Max"
 
-    async def test_method_mismatch_error(self, petstore_openapi_spec):
-        """Test that using wrong tool for a resource raises error."""
+    async def test_method_not_supported_error(self, petstore_openapi_spec):
+        """Test that using unsupported method raises error."""
         mock_client = AsyncMock()
         mock_client.base_url = "https://petstore.example.com/api"
 
         server = McpWebGateway(petstore_openapi_spec, mock_client)
 
-        # Try to use POST tool on a GET resource
+        # Try to use PATCH tool on a resource that doesn't support it
         async with Client(server) as client:
             with pytest.raises(Exception) as exc_info:
                 await client.call_tool(
-                    "POST", {"url": "https+get://petstore.example.com/api/pets"}
+                    "PATCH", {"url": "https://petstore.example.com/api/pets"}
                 )
 
-            assert "Method mismatch" in str(exc_info.value)
+            assert "Method PATCH not supported" in str(exc_info.value)
 
     async def test_query_parameters(self, petstore_openapi_spec):
         """Test that query parameters are passed correctly."""
@@ -217,7 +232,7 @@ class TestMcpWebGateway:
             await client.call_tool(
                 "GET",
                 {
-                    "url": "https+get://petstore.example.com/api/pets",
+                    "url": "https://petstore.example.com/api/pets",
                     "params": {"limit": 10, "status": "available"},
                 },
             )
@@ -267,7 +282,7 @@ class TestMcpWebGateway:
         result = await mcp_client.call_tool(
             "GET",
             {
-                "url": "https+get://petstore.example.com/api/pets",
+                "url": "https://petstore.example.com/api/pets",
                 "params": {"limit": 2, "status": "available"},
             },
         )
@@ -285,7 +300,7 @@ class TestMcpWebGateway:
         result = await mcp_client.call_tool(
             "POST",
             {
-                "url": "https+post://petstore.example.com/api/pets",
+                "url": "https://petstore.example.com/api/pets",
                 "body": {
                     "name": "Max",
                     "species": "dog",
@@ -320,7 +335,7 @@ class TestMcpWebGateway:
 
         # Delete pet
         result = await mcp_client.call_tool(
-            "DELETE", {"url": "https+delete://petstore.example.com/api/pets/3"}
+            "DELETE", {"url": "https://petstore.example.com/api/pets/3"}
         )
 
         # Should return empty content for 204
@@ -342,18 +357,134 @@ class TestMcpWebGateway:
         resources = await mcp_client.list_resources()
         resource_uris = {str(r.uri) for r in resources}
 
-        # Check resources exist
-        assert "https+get://petstore.example.com/api/pets" in resource_uris
-        assert "https+post://petstore.example.com/api/pets" in resource_uris
+        # Check resources exist (only one per path now)
+        assert "https://petstore.example.com/api/pets" in resource_uris
+        assert (
+            len([uri for uri in resource_uris if "/pets" in uri and "{" not in uri])
+            == 1
+        )
 
         # List templates
         templates = await mcp_client.list_resource_templates()
         template_uris = {str(t.uriTemplate) for t in templates}
 
-        # Check templates exist
-        assert "https+get://petstore.example.com/api/pets/{petId}" in template_uris
-        assert "https+put://petstore.example.com/api/pets/{petId}" in template_uris
-        assert "https+delete://petstore.example.com/api/pets/{petId}" in template_uris
+        # Check templates exist (only one per path now)
+        assert "https://petstore.example.com/api/pets/{petId}" in template_uris
+        assert len([uri for uri in template_uris if "/pets/{petId}" in uri]) == 1
+
+    async def test_resource_merging_on_collision(self, petstore_openapi_spec):
+        """Test that resources with the same path are merged into one."""
+        client = httpx.AsyncClient(base_url="https://petstore.example.com/api")
+        server = McpWebGateway(petstore_openapi_spec, client)
+
+        # Get the /pets resource
+        pets_resource = server._resource_manager._resources[
+            "https://petstore.example.com/api/pets"
+        ]
+
+        # Check that it has both GET and POST routes
+        assert hasattr(pets_resource, "_routes")
+        methods = {route.method for route in pets_resource._routes}
+        assert methods == {"GET", "POST"}
+
+        # Check that tags were merged
+        all_tags = set()
+        for route in pets_resource._routes:
+            if route.tags:
+                all_tags.update(route.tags)
+        assert pets_resource.tags >= all_tags
+
+    async def test_template_merging_on_collision(self, petstore_openapi_spec):
+        """Test that templates with the same path are merged into one."""
+        client = httpx.AsyncClient(base_url="https://petstore.example.com/api")
+        server = McpWebGateway(petstore_openapi_spec, client)
+
+        # Get the /pets/{petId} template
+        pet_template = server._resource_manager._templates[
+            "https://petstore.example.com/api/pets/{petId}"
+        ]
+
+        # Check that it has GET, PUT, and DELETE routes
+        assert hasattr(pet_template, "_routes")
+        methods = {route.method for route in pet_template._routes}
+        assert methods == {"GET", "PUT", "DELETE"}
+
+    async def test_merged_resource_schema_contains_all_methods(
+        self, petstore_openapi_spec
+    ):
+        """Test that reading a merged resource returns schema for all methods."""
+        client = httpx.AsyncClient(base_url="https://petstore.example.com/api")
+        server = McpWebGateway(petstore_openapi_spec, client)
+
+        # Get the /pets resource which should have both GET and POST
+        pets_resource = server._resource_manager._resources[
+            "https://petstore.example.com/api/pets"
+        ]
+
+        # Read the schema
+        schema_json = await pets_resource.read()
+        schema = json.loads(schema_json)
+
+        # Verify both methods are present
+        pets_ops = schema["paths"]["/pets"]
+        assert "get" in pets_ops
+        assert "post" in pets_ops
+
+        # Verify operation details are preserved
+        assert pets_ops["get"]["operationId"] == "list_pets"
+        assert pets_ops["post"]["operationId"] == "create_pet"
+        assert "parameters" in pets_ops["get"]
+        assert "requestBody" in pets_ops["post"]
+
+    async def test_add_route_prevents_duplicates(self, petstore_openapi_spec):
+        """Test that add_route doesn't add duplicate methods."""
+        from fastmcp.experimental.utilities.openapi import HTTPRoute
+
+        from mcp_web_gateway.components import WebResource
+
+        # Create a resource with one route
+        route1 = HTTPRoute(
+            method="GET", path="/test", operation_id="test_get", tags=["tag1"]
+        )
+
+        resource = WebResource(
+            client=httpx.AsyncClient(),
+            route=route1,
+            director=None,
+            uri="https://example.com/test",
+            name="test_resource",
+            description="Test resource",
+            tags={"tag1"},
+        )
+
+        # Try to add the same method
+        route2 = HTTPRoute(
+            method="GET", path="/test", operation_id="test_get_2", tags=["tag2"]
+        )
+
+        resource.add_route(route2)
+
+        # Should still have only one GET route
+        assert len(resource._routes) == 1
+        assert resource._routes[0] == route1
+
+        # Tags should not be updated since route wasn't added
+        assert resource.tags == {"tag1"}
+
+        # Now add a different method
+        route3 = HTTPRoute(
+            method="POST", path="/test", operation_id="test_post", tags=["tag3"]
+        )
+
+        resource.add_route(route3)
+
+        # Should now have two routes
+        assert len(resource._routes) == 2
+        methods = {r.method for r in resource._routes}
+        assert methods == {"GET", "POST"}
+
+        # Tags should include tag3
+        assert resource.tags >= {"tag1", "tag3"}
 
 
 class TestMcpWebGatewayEdgeCases:
