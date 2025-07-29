@@ -1,5 +1,6 @@
 import json
 import os
+import random
 from typing import Union
 
 import uvicorn
@@ -24,15 +25,6 @@ limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-
-class Info(BaseModel):
-    category: str
-    tool_name: str
-    api_name: str
-    tool_input: Union[str, dict]
-    strip: str
-    toolbench_key: str
 
 
 class Info(BaseModel):
@@ -224,7 +216,7 @@ def get_rapidapi_response(request: Request, info: Info):
     cache = {}
     try:
         tool_input = json.loads(tool_input)
-    except Exception as e:
+    except Exception:
         if tool_input == "":
             tool_input = {}
         elif isinstance(tool_input, dict):
@@ -233,7 +225,7 @@ def get_rapidapi_response(request: Request, info: Info):
             print(f"Can not parse tool input into json: {tool_input}")
             print(type(tool_input))
             print(tool_input)
-            response_dict = {"error": f"Tool input parse error...\n", "response": ""}
+            response_dict = {"error": "Tool input parse error...", "response": ""}
             return response_dict
     if not os.path.exists("my_tools_cache"):
         os.mkdir("my_tools_cache")
@@ -344,7 +336,7 @@ def get_rapidapi_response(request: Request, info: Info):
 @limiter.limit("999999/minute")
 def get_fake_rapidapi_response(request: Request, info: Info):
     print("using fake server")
-    user_key = info.toolbench_key
+    # user_key = info.toolbench_key  # Not used
 
     tool_name, standard_category, api_name, code_string = prepare_tool_name_and_url(
         info
@@ -359,7 +351,7 @@ def get_fake_rapidapi_response(request: Request, info: Info):
 
     try:
         tool_input = json.loads(tool_input)
-    except Exception as e:
+    except Exception:
         if tool_input == "":
             tool_input = {}
         elif isinstance(tool_input, dict):
@@ -368,7 +360,7 @@ def get_fake_rapidapi_response(request: Request, info: Info):
             print(f"Can not parse tool input into json: {tool_input}")
             print(type(tool_input))
             print(tool_input)
-            response_dict = {"error": f"Tool input parse error...\n", "response": ""}
+            response_dict = {"error": "Tool input parse error...", "response": ""}
             return response_dict
     if not os.path.exists("my_tools_cache"):
         os.mkdir("my_tools_cache")
@@ -591,7 +583,7 @@ Note that:
             result = result.replace("```json", "").replace("```", "").strip()
             result = json.loads(result)
         return result
-    except Exception as e:
+    except Exception:
         print(f"Can not parse result into json: {result}")
         return result
 

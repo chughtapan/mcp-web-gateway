@@ -86,12 +86,32 @@ curl http://localhost:8080/openapi.json | jq .
    - Input parameters
    - HTTP method semantics
 
-## MCP Web Gateway Integration
+## Experiment: Tool Count Limits
 
-```python
-from mcp_web_gateway import McpWebGateway
+This server demonstrates why traditional MCP approaches fail at scale. StableToolBench contains ~50,000 endpoints across 10,000+ tools, which exceeds practical tool limits:
 
-# Create gateway from OpenAPI spec
-mcp = McpWebGateway.from_url("http://localhost:8080/openapi.json")
-mcp.add_rest_tools()
+- **Recommended**: ~20 tools or less
+- **Soft limits**: ~40-50 tools (Cursor/Claude users report degraded performance)  
+- **Hard limits**: 128 tools (OpenAI models)
+
+### Running the Experiment
+
+The `mcp_server.py` script implements three strategies:
+
+```bash
+# 1. Convert everything to tools: Each HTTP method + path becomes a separate tool
+#    Result: >10,000 tools - exceeds all limits
+fastmcp run -t http evals/stabletoolbench/mcp_server.py -- --strategy=all-tools
+
+# 2. MCP Specification recommendation: Convert GET requests to resources/resource 
+#    templates, all other methods (POST/PUT/PATCH/DELETE) become tools
+#    Result: >10,000 tools - exceeds all limits  
+fastmcp run -t http evals/stabletoolbench/mcp_server.py -- --strategy=spec-recommend
+
+# 3. Web Gateway: Expose HTTP routes as resources with their original URIs,
+#    provide generic REST tools that operate on these resources
+#    Result: Tractable - works with all models
+fastmcp run -t http evals/stabletoolbench/mcp_server.py
 ```
+
+The experiment shows that while MCP servers can expose thousands of tools, language models cannot consume them effectively. Only the Web Gateway approach remains tractable at this scale.

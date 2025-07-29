@@ -11,27 +11,18 @@ import os
 from typing import Any, Dict
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 # Import from the copied RapidAPI server
-from toolbench_main import (
-    Info,
-    get_fake_rapidapi_response,
-    get_rapidapi_response,
-    prepare_tool_name_and_url,
-)
+from toolbench_main import Info, get_fake_rapidapi_response, get_rapidapi_response
 from utils import change_name, standardize
 
 # Configuration
 USE_FAKE_RESPONSES = True  # Always use fake responses for testing
-
-from slowapi import Limiter, _rate_limit_exceeded_handler
-
-# Import rate limiting
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 
 app = FastAPI(title="ToolBench REST API Server", version="1.0.0")
 
@@ -102,11 +93,8 @@ def create_rest_endpoint(category: str, tool_name: str, api: dict, tool_data: di
             tool_input = dict(request.query_params)
         else:
             # Body for POST/PUT/PATCH
-            try:
-                body = await request.json()
-                tool_input = body if isinstance(body, dict) else {}
-            except:
-                tool_input = {}
+            body = await request.json()
+            tool_input = body if isinstance(body, dict) else {}
 
         # Handle path parameters if any
         if hasattr(request, "path_params"):
