@@ -1,0 +1,29 @@
+# Build directory (contains all downloaded/extracted files)
+build/
+data/
+
+# Cache directories
+my_tools_cache/
+fake_response_cache/
+tool_response_cache/
+__pycache__/
+
+# Environment files
+.env
+.env.local
+
+# Tool environment (large extracted data)
+toolenv/
+
+# API keys
+rapidapi_keys.txt
+user_keys.txt
+
+# Logs
+*.log
+
+# Legacy files (if downloaded outside build/)
+BuildYourOwnRapidAPIServer.zip
+server_cache.zip
+BuildYourOwnRapidAPIServer/
+data.zip

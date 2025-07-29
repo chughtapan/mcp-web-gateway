@@ -1,0 +1,33 @@
+services:
+  rapidapi-server:
+    build: .
+    container_name: stabletoolbench-rapidapi
+    ports:
+      - "8080:8080"
+    env_file:
+      - ../../.env  # Use .env from project root
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data/tool_response_cache:/app/my_tools_cache:ro
+      - ./data/tools:/app/toolenv/tools:ro
+      - ../../.env:/app/.env:ro  # Mount .env from project root
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  # Optional: MCP Web Gateway integration
+  mcp-gateway:
+    image: mcp-web-gateway:latest
+    container_name: mcp-web-gateway
+    ports:
+      - "8081:8081"
+    environment:
+      - OPENAPI_URL=http://rapidapi-server:8080/openapi.json
+    depends_on:
+      - rapidapi-server
+    profiles:
+      - full
