@@ -43,6 +43,23 @@ class TestMcpWebGateway:
         # Check template URIs are plain HTTP URLs
         assert "https://petstore.example.com/api/pets/{petId}" in templates
 
+    async def test_rest_tools_include_options(self, petstore_openapi_spec):
+        """Test that REST tools include OPTIONS method."""
+        client = httpx.AsyncClient(base_url="https://petstore.example.com/api")
+        server = McpWebGateway(petstore_openapi_spec, client)
+
+        async with Client(server) as mcp_client:
+            tools = await mcp_client.list_tools()
+            tool_names = {tool.name for tool in tools}
+
+            # Check all REST tools are present including OPTIONS
+            assert "GET" in tool_names
+            assert "POST" in tool_names
+            assert "PUT" in tool_names
+            assert "PATCH" in tool_names
+            assert "DELETE" in tool_names
+            assert "OPTIONS" in tool_names
+
     async def test_resource_read_returns_schema(self, petstore_openapi_spec):
         """Test that reading a resource returns OpenAPI schema."""
         client = httpx.AsyncClient(base_url="https://petstore.example.com/api")
@@ -108,9 +125,9 @@ class TestMcpWebGateway:
         tools = await server.get_tools()
         tool_names = list(tools.keys())
 
-        # Should only have the 5 REST tools (default behavior)
-        assert len(tool_names) == 5
-        assert set(tool_names) == {"GET", "POST", "PUT", "PATCH", "DELETE"}
+        # Should only have the 6 REST tools (default behavior)
+        assert len(tool_names) == 6
+        assert set(tool_names) == {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 
         # Should not have operation-specific tools
         assert "list_pets" not in tool_names
@@ -142,11 +159,11 @@ class TestMcpWebGateway:
         # Add REST tools explicitly
         server.add_rest_tools()
 
-        # Now should have the 5 REST tools
+        # Now should have the 6 REST tools
         tools = await server.get_tools()
         tool_names = list(tools.keys())
-        assert len(tool_names) == 5
-        assert set(tool_names) == {"GET", "POST", "PUT", "PATCH", "DELETE"}
+        assert len(tool_names) == 6
+        assert set(tool_names) == {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 
     async def test_get_tool_execution(self, petstore_openapi_spec):
         """Test executing a GET request through the GET tool."""
@@ -278,7 +295,10 @@ class TestMcpWebGateway:
         # Create a mock response
         mock_response = Mock()
         mock_response.status_code = 200
-        mock_response.json.return_value = {"id": 1, "name": "Fluffy", "species": "cat"}
+        mock_response.json.return_value = [
+            {"id": 1, "name": "Fluffy", "species": "cat"},
+            {"id": 2, "name": "Buddy", "species": "dog"},
+        ]
         mock_response.raise_for_status = Mock()
 
         # Create mock client
@@ -288,21 +308,23 @@ class TestMcpWebGateway:
 
         server = McpWebGateway(petstore_openapi_spec, mock_client)
 
-        # Use plain URL without method prefix
+        # Use plain URL without method prefix - use /pets which is a registered resource
         async with Client(server) as client:
             result = await client.call_tool(
-                "GET", {"url": "https://petstore.example.com/api/pets/1"}  # Plain URL
+                "GET", {"url": "https://petstore.example.com/api/pets"}  # Plain URL
             )
 
         # Check the request was made correctly
         mock_client.request.assert_called_once_with(
             method="GET",
-            url="https://petstore.example.com/api/pets/1",
+            url="https://petstore.example.com/api/pets",
         )
 
-        # Check the result
-        assert result.structured_content["id"] == 1
-        assert result.structured_content["name"] == "Fluffy"
+        # Check the result (arrays are wrapped)
+        assert "result" in result.structured_content
+        pets = result.structured_content["result"]
+        assert len(pets) == 2
+        assert pets[0]["name"] == "Fluffy"
 
     async def test_get_tool_with_query_params_integration(self, server_and_client):
         """Test GET tool execution with query parameters using mock HTTP client."""
@@ -476,14 +498,38 @@ class TestMcpWebGateway:
             method="GET", path="/test", operation_id="test_get", tags=["tag1"]
         )
 
+        # Create a simple OpenAPI spec for testing
+        test_openapi_spec = {
+            "openapi": "3.0.0",
+            "paths": {
+                "/test": {
+                    "get": {
+                        "operationId": "test_get",
+                        "summary": "Test GET",
+                        "tags": ["tag1"],
+                    },
+                    "post": {
+                        "operationId": "test_post",
+                        "summary": "Test POST",
+                        "tags": ["tag3"],
+                    },
+                }
+            },
+        }
+
+        # Extract schema for the resource
+        schema = {
+            "openapi": "3.0.0",
+            "paths": {"/test": {"get": test_openapi_spec["paths"]["/test"]["get"]}},
+        }
+
         resource = WebResource(
-            client=httpx.AsyncClient(),
             route=route1,
-            director=None,
             uri="https://example.com/test",
             name="test_resource",
             description="Test resource",
             tags={"tag1"},
+            meta=schema,
         )
 
         # Try to add the same method
@@ -491,7 +537,9 @@ class TestMcpWebGateway:
             method="GET", path="/test", operation_id="test_get_2", tags=["tag2"]
         )
 
-        resource.add_route(route2)
+        # Extract method schema for the route
+        method_schema = test_openapi_spec["paths"]["/test"]["get"]
+        resource.add_route(route2, method_schema)
 
         # Should still have only one GET route
         assert len(resource._routes) == 1
@@ -505,7 +553,9 @@ class TestMcpWebGateway:
             method="POST", path="/test", operation_id="test_post", tags=["tag3"]
         )
 
-        resource.add_route(route3)
+        # Extract method schema for the route
+        method_schema = test_openapi_spec["paths"]["/test"]["post"]
+        resource.add_route(route3, method_schema)
 
         # Should now have two routes
         assert len(resource._routes) == 2
@@ -519,26 +569,16 @@ class TestMcpWebGateway:
 class TestMcpWebGatewayEdgeCases:
     """Test edge cases and error handling."""
 
-    async def test_url_without_annotations_warning(self):
-        """Test that URLs without annotations in registry still work but log warning."""
+    async def test_url_without_resources_in_spec(self):
+        """Test that URLs are rejected in closed-world mode when spec has no paths."""
         spec = {
             "openapi": "3.0.0",
             "info": {"title": "Test", "version": "1.0"},
             "paths": {},
         }
 
-        # Create mock client that will return 404
-        mock_response = Mock()
-        mock_response.status_code = 404
-        mock_response.reason_phrase = "Not Found"
-        mock_response.json.side_effect = ValueError()
-        mock_response.text = "Not found"
-        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
-            "404 Not Found", request=None, response=mock_response
-        )
-
         mock_client = AsyncMock()
-        mock_client.request = AsyncMock(return_value=mock_response)
+        mock_client.base_url = "https://api.example.com"
 
         server = McpWebGateway(spec, mock_client)
 
@@ -548,8 +588,147 @@ class TestMcpWebGatewayEdgeCases:
                     "GET", {"url": "https://api.example.com/nonexistent"}
                 )
 
-            # Should get HTTP error, not resource not found
-            assert "HTTP error 404" in str(exc_info.value)
+            # In closed-world mode, should reject unknown resources
+            assert "does not match any known resource" in str(exc_info.value)
+
+    @pytest.fixture
+    def complex_spec(self):
+        """Create a complex OpenAPI spec with various edge cases."""
+        return {
+            "openapi": "3.0.0",
+            "info": {"title": "Complex API", "version": "1.0.0"},
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {
+                "/": {
+                    "get": {
+                        "operationId": "get_root",
+                        "responses": {"200": {"description": "Success"}},
+                    }
+                },
+                "/api": {
+                    "get": {
+                        "operationId": "get_api",
+                        "responses": {"200": {"description": "Success"}},
+                    }
+                },
+                "/api/v1": {
+                    "get": {
+                        "operationId": "get_v1",
+                        "responses": {"200": {"description": "Success"}},
+                    }
+                },
+                "/api/v1/users": {
+                    "get": {
+                        "operationId": "list_users",
+                        "responses": {"200": {"description": "Success"}},
+                    },
+                    "post": {
+                        "operationId": "create_user",
+                        "responses": {"201": {"description": "Created"}},
+                    },
+                },
+                "/api/v1/users/{userId}": {
+                    "get": {
+                        "operationId": "get_user",
+                        "parameters": [
+                            {
+                                "name": "userId",
+                                "in": "path",
+                                "required": True,
+                                "schema": {"type": "string"},
+                            }
+                        ],
+                        "responses": {"200": {"description": "Success"}},
+                    }
+                },
+                "/special%20path": {
+                    "get": {
+                        "operationId": "get_special",
+                        "responses": {"200": {"description": "Success"}},
+                    }
+                },
+                "/unicode/测试": {
+                    "get": {
+                        "operationId": "get_unicode",
+                        "responses": {"200": {"description": "Success"}},
+                    }
+                },
+            },
+        }
+
+    async def test_options_root_path(self, complex_spec):
+        """Test OPTIONS on root path."""
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://api.example.com"
+
+        server = McpWebGateway(complex_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            # Exact match on root
+            result = await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://api.example.com/"}
+            )
+
+            # Should return schema for root path
+            assert "openapi" in result.structured_content
+            assert "/" in result.structured_content["paths"]
+
+    async def test_options_hierarchical_paths(self, complex_spec):
+        """Test OPTIONS with hierarchical path structure."""
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://api.example.com"
+
+        server = McpWebGateway(complex_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            # Test prefix matching at different levels
+            result1 = await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://api.example.com/api/v"}
+            )
+            routes1 = result1.structured_content["matching_routes"]
+
+            # Should match /api/v1 and its sub-paths
+            assert len(routes1) == 3  # /api/v1, /api/v1/users, /api/v1/users/{userId}
+
+            # Verify ordering (breadth-first)
+            urls = [r["url"] for r in routes1]
+            assert urls[0] == "https://api.example.com/api/v1"  # Depth 2
+            assert urls[1] == "https://api.example.com/api/v1/users"  # Depth 3
+            assert urls[2] == "https://api.example.com/api/v1/users/{userId}"  # Depth 4
+
+    async def test_options_special_characters_in_path(self, complex_spec):
+        """Test OPTIONS with special characters in URL."""
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://api.example.com"
+
+        server = McpWebGateway(complex_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            # Test URL with encoded space
+            result = await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://api.example.com/special%20path"}
+            )
+
+            # Should return schema
+            assert "openapi" in result.structured_content
+            assert "/special%20path" in result.structured_content["paths"]
+
+    async def test_options_unicode_in_path(self, complex_spec):
+        """Test OPTIONS with Unicode characters in URL."""
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://api.example.com"
+
+        server = McpWebGateway(complex_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            # Test URL with Unicode characters
+            result = await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://api.example.com/unicode/测试"}
+            )
+
+            # Should return schema
+            assert "openapi" in result.structured_content
+            assert "/unicode/测试" in result.structured_content["paths"]
 
 
 class TestOpenWorldBehavior:
@@ -685,3 +864,319 @@ class TestOpenWorldBehavior:
 
             error_msg = str(exc_info.value)
             assert "does not match any known resource" in error_msg
+
+
+class TestOptionsMethod:
+    """Test OPTIONS method functionality."""
+
+    @pytest.fixture
+    def petstore_spec_with_options(self, petstore_openapi_spec):
+        """Create a petstore spec with OPTIONS method defined."""
+        spec = petstore_openapi_spec.copy()
+        spec["paths"]["/pets"]["options"] = {
+            "operationId": "options_pets",
+            "summary": "Get CORS headers for pets endpoint",
+            "responses": {
+                "200": {
+                    "description": "Success",
+                    "headers": {
+                        "Allow": {"description": "Allowed methods"},
+                        "Access-Control-Allow-Origin": {"description": "CORS origin"},
+                    },
+                }
+            },
+        }
+        return spec
+
+    async def test_options_with_defined_method(self, petstore_spec_with_options):
+        """Test OPTIONS when it's explicitly defined in the OpenAPI spec."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {}
+        mock_response.headers = {
+            "Allow": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Origin": "*",
+        }
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://petstore.example.com/api"
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        server = McpWebGateway(petstore_spec_with_options, mock_client)
+
+        async with Client(server) as mcp_client:
+            await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://petstore.example.com/api/pets"}
+            )
+
+            # Should have made an OPTIONS request
+            mock_client.request.assert_called_once_with(
+                method="OPTIONS",
+                url="https://petstore.example.com/api/pets",
+            )
+
+    async def test_options_exact_match_returns_schema(self, petstore_openapi_spec):
+        """Test OPTIONS returns schema for exact resource match without OPTIONS method."""
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://petstore.example.com/api"
+
+        server = McpWebGateway(petstore_openapi_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            result = await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://petstore.example.com/api/pets"}
+            )
+
+            # Should return the OpenAPI schema
+            assert result.structured_content["openapi"] == "3.0.0"
+            assert "paths" in result.structured_content
+            assert "/pets" in result.structured_content["paths"]
+
+            # Check both GET and POST are documented
+            pets_path = result.structured_content["paths"]["/pets"]
+            assert "get" in pets_path
+            assert "post" in pets_path
+            assert pets_path["get"]["operationId"] == "list_pets"
+            assert pets_path["post"]["operationId"] == "create_pet"
+
+    async def test_options_prefix_match(self, petstore_openapi_spec):
+        """Test OPTIONS with prefix matching returns list of matching routes."""
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://petstore.example.com/api"
+
+        server = McpWebGateway(petstore_openapi_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            # Use base API URL as prefix
+            result = await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://petstore.example.com/api/"}
+            )
+
+            # Should return matching routes
+            assert "matching_routes" in result.structured_content
+            assert "description" in result.structured_content
+            assert "Routes matching prefix:" in result.structured_content["description"]
+
+            routes = result.structured_content["matching_routes"]
+            assert len(routes) == 2  # /pets and /pets/{petId}
+
+            # Check /pets resource
+            pets_route = next(r for r in routes if r["url"].endswith("/pets"))
+            assert pets_route["type"] == "resource"
+            assert set(pets_route["methods"]) == {"GET", "POST"}
+
+            # Check /pets/{petId} template
+            pet_id_route = next(r for r in routes if "{petId}" in r["url"])
+            assert pet_id_route["type"] == "template"
+            assert set(pet_id_route["methods"]) == {"GET", "PUT", "DELETE"}
+
+    async def test_options_partial_path_prefix(self, petstore_openapi_spec):
+        """Test OPTIONS with partial path as prefix."""
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://petstore.example.com/api"
+
+        server = McpWebGateway(petstore_openapi_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            # Use partial path
+            result = await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://petstore.example.com/api/pet"}
+            )
+
+            # Should return both /pets routes since "pet" is a prefix of "pets"
+            assert "matching_routes" in result.structured_content
+            routes = result.structured_content["matching_routes"]
+            assert len(routes) == 2
+            assert all("/pets" in r["url"] for r in routes)
+
+    async def test_options_no_matches(self, petstore_openapi_spec):
+        """Test OPTIONS when no resources match the URL."""
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://petstore.example.com/api"
+
+        server = McpWebGateway(petstore_openapi_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            with pytest.raises(Exception) as exc_info:
+                await mcp_client.call_tool(
+                    "OPTIONS", {"url": "https://petstore.example.com/api/users"}
+                )
+
+            assert "No resources found matching URL" in str(exc_info.value)
+
+    async def test_options_open_world_mode(self):
+        """Test OPTIONS in open-world mode for external URLs."""
+        minimal_spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test", "version": "1.0"},
+            "paths": {
+                "/internal": {
+                    "get": {
+                        "operationId": "get_internal",
+                        "responses": {"200": {"description": "Success"}},
+                    }
+                }
+            },
+        }
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {}
+        mock_response.headers = {"Allow": "GET, POST, PUT, DELETE, OPTIONS"}
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://api.example.com"
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        # Create server with open_world=True
+        server = McpWebGateway(minimal_spec, mock_client, open_world=True)
+
+        async with Client(server) as mcp_client:
+            # Try OPTIONS on external URL
+            await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://external.com/api/resource"}
+            )
+
+            # Should have made the OPTIONS request
+            mock_client.request.assert_called_once_with(
+                method="OPTIONS",
+                url="https://external.com/api/resource",
+            )
+
+    async def test_options_with_query_parameters(self, petstore_spec_with_options):
+        """Test OPTIONS with query parameters when method is defined."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {}
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://petstore.example.com/api"
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        server = McpWebGateway(petstore_spec_with_options, mock_client)
+
+        async with Client(server) as mcp_client:
+            await mcp_client.call_tool(
+                "OPTIONS",
+                {
+                    "url": "https://petstore.example.com/api/pets",
+                    "params": {"format": "json"},
+                },
+            )
+
+            # Should pass query parameters
+            mock_client.request.assert_called_once_with(
+                method="OPTIONS",
+                url="https://petstore.example.com/api/pets",
+                params={"format": "json"},
+            )
+
+    async def test_options_template_exact_match(self, petstore_openapi_spec):
+        """Test OPTIONS on a template URL returns schema."""
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://petstore.example.com/api"
+
+        server = McpWebGateway(petstore_openapi_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            # OPTIONS on the template itself (not an instance)
+            result = await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://petstore.example.com/api/pets/{petId}"}
+            )
+
+            # Should return schema with all template methods
+            assert "openapi" in result.structured_content
+            assert "paths" in result.structured_content
+            # The path shows the template pattern (without base URL prefix)
+            assert "/pets/{petId}" in result.structured_content["paths"]
+
+            # Check that all methods are documented
+            pet_operations = result.structured_content["paths"]["/pets/{petId}"]
+            assert "get" in pet_operations
+            assert "put" in pet_operations
+            assert "delete" in pet_operations
+
+
+class TestPathSorting:
+    """Test path sorting functionality."""
+
+    async def test_find_matching_routes_breadth_first_order(self):
+        """Test that routes are sorted in breadth-first lexicographical order."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test", "version": "1.0"},
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {
+                "/users": {"get": {"responses": {"200": {"description": "OK"}}}},
+                "/posts": {"get": {"responses": {"200": {"description": "OK"}}}},
+                "/api": {"get": {"responses": {"200": {"description": "OK"}}}},
+                "/users/{id}": {"get": {"responses": {"200": {"description": "OK"}}}},
+                "/posts/{id}": {"get": {"responses": {"200": {"description": "OK"}}}},
+                "/api/v1": {"get": {"responses": {"200": {"description": "OK"}}}},
+                "/api/v2": {"get": {"responses": {"200": {"description": "OK"}}}},
+                "/users/{id}/posts": {
+                    "get": {"responses": {"200": {"description": "OK"}}}
+                },
+                "/api/v1/users": {"get": {"responses": {"200": {"description": "OK"}}}},
+            },
+        }
+
+        client = httpx.AsyncClient(base_url="https://api.example.com")
+        server = McpWebGateway(spec, client)
+
+        # Get all routes
+        routes = server._find_matching_routes("https://api.example.com/")
+
+        # Extract just the paths for easier verification
+        paths = [r["url"].replace("https://api.example.com", "") for r in routes]
+
+        # Expected order: breadth-first, lexicographical within each depth
+        # Depth 1: /api, /posts, /users
+        # Depth 2: /api/v1, /api/v2, /posts/{id}, /users/{id}
+        # Depth 3: /api/v1/users, /users/{id}/posts
+        expected_order = [
+            "/api",
+            "/posts",
+            "/users",
+            "/api/v1",
+            "/api/v2",
+            "/posts/{id}",
+            "/users/{id}",
+            "/api/v1/users",
+            "/users/{id}/posts",
+        ]
+
+        assert paths == expected_order
+
+    async def test_find_matching_routes_with_root_path(self):
+        """Test sorting handles root path correctly."""
+        spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Test", "version": "1.0"},
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {
+                "/": {"get": {"responses": {"200": {"description": "OK"}}}},
+                "/api": {"get": {"responses": {"200": {"description": "OK"}}}},
+                "/users": {"get": {"responses": {"200": {"description": "OK"}}}},
+                "/api/v1": {"get": {"responses": {"200": {"description": "OK"}}}},
+            },
+        }
+
+        client = httpx.AsyncClient(base_url="https://api.example.com")
+        server = McpWebGateway(spec, client)
+
+        routes = server._find_matching_routes("https://api.example.com/")
+        paths = [r["url"].replace("https://api.example.com", "") for r in routes]
+
+        # Root should come first (depth 0), then depth 1, then depth 2
+        expected_order = [
+            "/",  # Depth 0
+            "/api",  # Depth 1
+            "/users",  # Depth 1
+            "/api/v1",  # Depth 2
+        ]
+
+        assert paths == expected_order

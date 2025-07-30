@@ -208,13 +208,13 @@ class TestFastAPIIntegration:
         tool_names = {t.name for t in tools}
 
         # Should only have REST tools
-        assert tool_names == {"GET", "POST", "PUT", "PATCH", "DELETE"}
+        assert tool_names == {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
 
     async def test_list_items_empty(self, gateway_and_client):
         """Test listing items when store is empty."""
         gateway, client = gateway_and_client
 
-        result = await client.call_tool("GET", {"url": "http+get://fastapi/items"})
+        result = await client.call_tool("GET", {"url": "http://fastapi/items"})
 
         # Empty list should be wrapped
         assert result.structured_content == {"result": []}
@@ -227,7 +227,7 @@ class TestFastAPIIntegration:
         create_result = await client.call_tool(
             "POST",
             {
-                "url": "http+post://fastapi/items",
+                "url": "http://fastapi/items",
                 "body": {
                     "name": "Widget",
                     "description": "A useful widget",
@@ -259,7 +259,7 @@ class TestFastAPIIntegration:
         create_result = await client.call_tool(
             "POST",
             {
-                "url": "http+post://fastapi/items",
+                "url": "http://fastapi/items",
                 "body": {"name": "Original", "price": 10.00},
             },
         )
@@ -270,7 +270,7 @@ class TestFastAPIIntegration:
         update_result = await client.call_tool(
             "PUT",
             {
-                "url": f"http+put://fastapi/items/{item_id}",
+                "url": f"http://fastapi/items/{item_id}",
                 "body": {
                     "name": "Updated",
                     "description": "Now with description",
@@ -291,7 +291,7 @@ class TestFastAPIIntegration:
         create_result = await client.call_tool(
             "POST",
             {
-                "url": "http+post://fastapi/items",
+                "url": "http://fastapi/items",
                 "body": {"name": "Original", "price": 10.00},
             },
         )
@@ -302,7 +302,7 @@ class TestFastAPIIntegration:
         patch_result = await client.call_tool(
             "PATCH",
             {
-                "url": f"http+patch://fastapi/items/{item_id}",
+                "url": f"http://fastapi/items/{item_id}",
                 "body": {"price": 12.00},  # Only update price
             },
         )
@@ -318,7 +318,7 @@ class TestFastAPIIntegration:
         create_result = await client.call_tool(
             "POST",
             {
-                "url": "http+post://fastapi/items",
+                "url": "http://fastapi/items",
                 "body": {"name": "To Delete", "price": 5.00},
             },
         )
@@ -327,7 +327,7 @@ class TestFastAPIIntegration:
 
         # Delete the item
         delete_result = await client.call_tool(
-            "DELETE", {"url": f"http+delete://fastapi/items/{item_id}"}
+            "DELETE", {"url": f"http://fastapi/items/{item_id}"}
         )
 
         # 204 returns empty content
@@ -348,14 +348,14 @@ class TestFastAPIIntegration:
             await client.call_tool(
                 "POST",
                 {
-                    "url": "http+post://fastapi/items",
+                    "url": "http://fastapi/items",
                     "body": {"name": f"Item {i}", "price": float(i * 10)},
                 },
             )
 
         # Test limit parameter
         result = await client.call_tool(
-            "GET", {"url": "http+get://fastapi/items", "params": {"limit": 3}}
+            "GET", {"url": "http://fastapi/items", "params": {"limit": 3}}
         )
 
         items = result.structured_content["result"]
@@ -363,7 +363,7 @@ class TestFastAPIIntegration:
 
         # Test min_price parameter
         result = await client.call_tool(
-            "GET", {"url": "http+get://fastapi/items", "params": {"min_price": 20.0}}
+            "GET", {"url": "http://fastapi/items", "params": {"min_price": 20.0}}
         )
 
         items = result.structured_content["result"]
@@ -414,14 +414,13 @@ class TestFastAPIIntegration:
         assert "head" in items_operations, "HEAD method should be present"
         assert "options" in items_operations, "OPTIONS method should be present"
 
-        # But HEAD and OPTIONS should NOT have corresponding tools
+        # OPTIONS should have a corresponding tool, but HEAD should not
         tools = await client.list_tools()
         tool_names = {t.name for t in tools}
 
-        # Only standard REST tools should exist
-        assert tool_names == {"GET", "POST", "PUT", "PATCH", "DELETE"}
-        assert "HEAD" not in tool_names
-        assert "OPTIONS" not in tool_names
+        # Standard REST tools including OPTIONS should exist
+        assert tool_names == {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}
+        assert "HEAD" not in tool_names  # HEAD still not a tool
 
 
 class TestFastAPIMethodInvocation:
@@ -433,7 +432,7 @@ class TestFastAPIMethodInvocation:
         tracker.clear()
 
         # Call GET tool
-        await client.call_tool("GET", {"url": "http+get://fastapi/items"})
+        await client.call_tool("GET", {"url": "http://fastapi/items"})
 
         # Verify GET method was called
         invocations = tracker.get_invocations()
@@ -449,7 +448,7 @@ class TestFastAPIMethodInvocation:
         await client.call_tool(
             "POST",
             {
-                "url": "http+post://fastapi/items",
+                "url": "http://fastapi/items",
                 "body": {"name": "Test Item", "price": 9.99},
             },
         )
@@ -467,7 +466,7 @@ class TestFastAPIMethodInvocation:
         result = await client.call_tool(
             "POST",
             {
-                "url": "http+post://fastapi/items",
+                "url": "http://fastapi/items",
                 "body": {"name": "Original", "price": 10.00},
             },
         )
@@ -479,7 +478,7 @@ class TestFastAPIMethodInvocation:
         await client.call_tool(
             "PUT",
             {
-                "url": f"http+put://fastapi/items/{item_id}",
+                "url": f"http://fastapi/items/{item_id}",
                 "body": {"name": "Updated", "price": 15.00},
             },
         )
@@ -497,7 +496,7 @@ class TestFastAPIMethodInvocation:
         result = await client.call_tool(
             "POST",
             {
-                "url": "http+post://fastapi/items",
+                "url": "http://fastapi/items",
                 "body": {"name": "Original", "price": 10.00},
             },
         )
@@ -509,7 +508,7 @@ class TestFastAPIMethodInvocation:
         await client.call_tool(
             "PATCH",
             {
-                "url": f"http+patch://fastapi/items/{item_id}",
+                "url": f"http://fastapi/items/{item_id}",
                 "body": {"price": 12.00},  # Only update price
             },
         )
@@ -527,7 +526,7 @@ class TestFastAPIMethodInvocation:
         result = await client.call_tool(
             "POST",
             {
-                "url": "http+post://fastapi/items",
+                "url": "http://fastapi/items",
                 "body": {"name": "To Delete", "price": 5.00},
             },
         )
@@ -536,9 +535,7 @@ class TestFastAPIMethodInvocation:
         tracker.clear()
 
         # Call DELETE tool
-        await client.call_tool(
-            "DELETE", {"url": f"http+delete://fastapi/items/{item_id}"}
-        )
+        await client.call_tool("DELETE", {"url": f"http://fastapi/items/{item_id}"})
 
         # Verify DELETE method was called
         invocations = tracker.get_invocations()
@@ -712,7 +709,7 @@ class TestOpenWorldIntegration:
             assert invocations[1] == ("GET", "/unknown/endpoint")
 
     async def test_all_rest_tools_respect_open_world_setting(self, simple_app):
-        """Test that all REST tools (GET, POST, PUT, PATCH, DELETE) respect open_world."""
+        """Test that all REST tools (GET, POST, PUT, PATCH, DELETE, OPTIONS) respect open_world."""
         # Create gateway with closed world
         mcp_closed = McpWebGateway.from_fastapi(simple_app)
 
@@ -720,7 +717,7 @@ class TestOpenWorldIntegration:
             tools = await client.list_tools()
 
             # Verify all REST tools have openWorldHint=False
-            for tool_name in ["GET", "POST", "PUT", "PATCH", "DELETE"]:
+            for tool_name in ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]:
                 tool = next(t for t in tools if t.name == tool_name)
                 assert tool.annotations is not None
                 assert tool.annotations.openWorldHint is False
@@ -732,7 +729,139 @@ class TestOpenWorldIntegration:
             tools = await client.list_tools()
 
             # Verify all REST tools have openWorldHint=True
-            for tool_name in ["GET", "POST", "PUT", "PATCH", "DELETE"]:
+            for tool_name in ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]:
                 tool = next(t for t in tools if t.name == tool_name)
                 assert tool.annotations is not None
                 assert tool.annotations.openWorldHint is True
+
+
+class TestOptionsIntegration:
+    """Test OPTIONS method integration with FastAPI."""
+
+    async def test_options_method_invoked(self, gateway_and_client_with_tracking):
+        """Test that OPTIONS tool invokes OPTIONS method on FastAPI."""
+        gateway, client, tracker = gateway_and_client_with_tracking
+        tracker.clear()
+
+        # Call OPTIONS tool
+        await client.call_tool("OPTIONS", {"url": "http://fastapi/items"})
+
+        # Should return schema (since OPTIONS is defined in the FastAPI app)
+        # Verify OPTIONS method was called
+        invocations = tracker.get_invocations()
+        assert len(invocations) == 1
+        assert invocations[0] == ("OPTIONS", "/items")
+
+    async def test_options_defined_endpoint_execution(self, gateway_and_client):
+        """Test OPTIONS when it's explicitly defined returns correct response."""
+        gateway, client = gateway_and_client
+
+        # Call OPTIONS on /items (which has OPTIONS defined)
+        result = await client.call_tool("OPTIONS", {"url": "http://fastapi/items"})
+
+        # Should return the OPTIONS response
+        assert result.structured_content == {
+            "methods": ["GET", "POST", "HEAD", "OPTIONS"]
+        }
+
+    async def test_options_template_returns_full_schema(self, gateway_and_client):
+        """Test OPTIONS on template returns full schema."""
+        gateway, client = gateway_and_client
+
+        # Call OPTIONS on the template URL itself
+        result = await client.call_tool(
+            "OPTIONS", {"url": "http://fastapi/items/{item_id}"}
+        )
+
+        # Should return full OpenAPI schema for templates
+        assert "openapi" in result.structured_content
+        assert "paths" in result.structured_content
+        assert "/items/{item_id}" in result.structured_content["paths"]
+
+        # For templates, we get all methods documented
+        item_operations = result.structured_content["paths"]["/items/{item_id}"]
+        assert "get" in item_operations
+        assert "put" in item_operations
+        assert "patch" in item_operations
+        assert "delete" in item_operations
+
+    async def test_options_prefix_match_fastapi(self, gateway_and_client):
+        """Test OPTIONS prefix matching with FastAPI routes."""
+        gateway, client = gateway_and_client
+
+        # Use base URL as prefix
+        result = await client.call_tool("OPTIONS", {"url": "http://fastapi/"})
+
+        # Should return matching routes
+        assert "matching_routes" in result.structured_content
+        routes = result.structured_content["matching_routes"]
+
+        # Check we have both resources and templates
+        resource_urls = [r["url"] for r in routes if r["type"] == "resource"]
+        template_urls = [r["url"] for r in routes if r["type"] == "template"]
+
+        assert "http://fastapi/items" in resource_urls
+        assert "http://fastapi/items/{item_id}" in template_urls
+
+    async def test_options_with_query_params_fastapi(
+        self, gateway_and_client_with_tracking
+    ):
+        """Test OPTIONS with query parameters on FastAPI endpoint."""
+        gateway, client, tracker = gateway_and_client_with_tracking
+        tracker.clear()
+
+        # Call OPTIONS with query params
+        await client.call_tool(
+            "OPTIONS",
+            {
+                "url": "http://fastapi/items",
+                "params": {"format": "json"},
+            },
+        )
+
+        # Should have passed query params to the OPTIONS request
+        invocations = tracker.get_invocations()
+        assert len(invocations) == 1
+        assert invocations[0] == ("OPTIONS", "/items")
+
+    @pytest.fixture
+    def dynamic_fastapi_app(self):
+        """Create a FastAPI app that we can modify during tests."""
+        app = FastAPI(title="Dynamic Test API")
+
+        @app.get("/products")
+        def list_products():
+            return {"products": []}
+
+        return app
+
+    async def test_options_dynamic_route_addition(self, dynamic_fastapi_app):
+        """Test OPTIONS behavior when routes are added after MCP creation."""
+        # Create MCP server with initial routes
+        mcp = McpWebGateway.from_fastapi(dynamic_fastapi_app)
+
+        # Add a new route after MCP creation
+        @dynamic_fastapi_app.post("/products")
+        def create_product(name: str):
+            return {"name": name, "id": 1}
+
+        async with Client(mcp) as client:
+            # OPTIONS should still only see the original route
+            result = await client.call_tool(
+                "OPTIONS", {"url": "http://fastapi/products"}
+            )
+
+            # Should return schema with only GET (not POST)
+            assert "openapi" in result.structured_content
+            products_ops = result.structured_content["paths"]["/products"]
+            assert "get" in products_ops
+            assert "post" not in products_ops  # POST was added after MCP creation
+
+    async def test_options_no_match_fastapi(self, gateway_and_client):
+        """Test OPTIONS with non-existent FastAPI endpoint."""
+        gateway, client = gateway_and_client
+
+        with pytest.raises(Exception) as exc_info:
+            await client.call_tool("OPTIONS", {"url": "http://fastapi/nonexistent"})
+
+        assert "No resources found matching URL" in str(exc_info.value)

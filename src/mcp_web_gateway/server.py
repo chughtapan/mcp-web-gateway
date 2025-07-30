@@ -5,9 +5,8 @@ and provides generic REST tools to execute requests.
 """
 
 import json
-import re
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import httpx
 from fastmcp.experimental.server.openapi import FastMCPOpenAPI
@@ -15,10 +14,12 @@ from fastmcp.experimental.utilities.openapi import (
     HTTPRoute,
     format_description_with_responses,
 )
+from fastmcp.resources.template import match_uri_template
 from fastmcp.tools.tool import ToolResult
 from fastmcp.utilities.logging import get_logger
 
 from .components import WebResource, WebResourceTemplate
+from .openapi_utils import OpenAPISchemaExtractor, PathMatcher
 from .routing import WEB_GATEWAY_ROUTE_MAPPINGS
 
 logger = get_logger(__name__)
@@ -78,6 +79,11 @@ class McpWebGateway(FastMCPOpenAPI):
         """
         # Check for unsupported settings
         self._check_unsupported_settings(**settings)
+
+        # Store the original OpenAPI spec for later use
+        self._openapi_spec = openapi_spec
+        # Create schema extractor
+        self._schema_extractor = OpenAPISchemaExtractor(openapi_spec)
 
         # Override route_maps with web gateway mappings
         settings["route_maps"] = WEB_GATEWAY_ROUTE_MAPPINGS
@@ -231,6 +237,15 @@ class McpWebGateway(FastMCPOpenAPI):
             "required": [p.name for p in path_params if p.required],
         }
 
+    def _extract_method_schema(self, route: HTTPRoute) -> dict[str, Any]:
+        """Extract the OpenAPI schema for a specific method from a route."""
+        # Get the path item from the original spec
+        paths = self._openapi_spec.get("paths", {})
+        path_item = paths.get(route.path, {})
+        # Return the method schema
+        method_schema: dict[str, Any] = path_item.get(route.method.lower(), {})
+        return method_schema
+
     def _create_openapi_resource(
         self,
         route: HTTPRoute,
@@ -244,8 +259,10 @@ class McpWebGateway(FastMCPOpenAPI):
         existing_resource = self._resource_manager._resources.get(resource_uri)
 
         if existing_resource and isinstance(existing_resource, WebResource):
+            # Extract method schema for this route
+            method_schema = self._extract_method_schema(route)
             # Add the route to the existing resource
-            existing_resource.add_route(route)
+            existing_resource.add_route(route, method_schema)
             logger.debug(
                 f"Added route {route.method} to existing resource: {resource_uri}"
             )
@@ -254,15 +271,18 @@ class McpWebGateway(FastMCPOpenAPI):
             resource_name = self._get_unique_name(name, "resource")
             description = self._create_enhanced_description(route, "Represents")
 
+            # Extract schema for this resource
+            schema = self._schema_extractor.extract_path_schema(
+                route.path, [route.method]
+            )
+
             resource = WebResource(
-                client=self._client,
                 route=route,
-                director=self._director,
                 uri=resource_uri,
                 name=resource_name,
                 description=description,
                 tags=set(route.tags or []) | tags,
-                timeout=self._timeout,
+                meta=schema,
             )
 
             # Register the resource
@@ -284,8 +304,10 @@ class McpWebGateway(FastMCPOpenAPI):
         existing_template = self._resource_manager._templates.get(uri_template)
 
         if existing_template and isinstance(existing_template, WebResourceTemplate):
+            # Extract method schema for this route
+            method_schema = self._extract_method_schema(route)
             # Add the route to the existing template
-            existing_template.add_route(route)
+            existing_template.add_route(route, method_schema)
             logger.debug(
                 f"Added route {route.method} to existing template: {uri_template}"
             )
@@ -295,16 +317,19 @@ class McpWebGateway(FastMCPOpenAPI):
             description = self._create_enhanced_description(route, "Template for")
             template_params_schema = self._build_template_parameter_schema(route)
 
+            # Extract schema for this template
+            schema = self._schema_extractor.extract_path_schema(
+                route.path, [route.method]
+            )
+
             template = WebResourceTemplate(
-                client=self._client,
                 route=route,
-                director=self._director,
                 uri_template=uri_template,
                 name=template_name,
                 description=description,
                 parameters=template_params_schema,
                 tags=set(route.tags or []) | tags,
-                timeout=self._timeout,
+                meta=schema,
             )
 
             # Register the template
@@ -383,57 +408,45 @@ class McpWebGateway(FastMCPOpenAPI):
         async def delete_tool(url: str, params: dict[str, Any] | None = None) -> Any:
             return await execute_request("DELETE", url, params=params)
 
+        @self.tool(
+            name="OPTIONS",
+            description="Execute an OPTIONS request on a URL. If OPTIONS is defined in the schema, executes it. Otherwise returns schema for exact matches or lists matching routes for prefix matches.",
+            annotations={"openWorldHint": open_world},
+        )
+        async def options_tool(url: str, params: dict[str, Any] | None = None) -> Any:
+            return await self._execute_options_method(
+                url, params=params, open_world=open_world
+            )
+
     async def _read_resource_schema(self, url: str) -> dict[str, Any] | None:
         """Read resource to get OpenAPI schema."""
         # Check if it's a direct resource
         if url in self._resource_manager._resources:
             resource = self._resource_manager._resources[url]
-            schema_json = await resource.read()
-            if isinstance(schema_json, str):
-                parsed_schema = json.loads(schema_json)
-                if isinstance(parsed_schema, dict):
-                    return parsed_schema
+            # Directly access the meta field which contains the schema
+            if hasattr(resource, "meta") and isinstance(resource.meta, dict):
+                return resource.meta
             return None
 
         # Check templates
         for template_uri, template in self._resource_manager._templates.items():
-            # Simple check if URL matches template pattern
-            template_path = urlparse(template_uri).path
-            url_path = urlparse(url).path
-
-            # Basic pattern matching (this could be improved)
-            if "{" in template_path:
-                pattern = re.escape(template_path)
-                pattern = pattern.replace(r"\{[^}]+\}", r"[^/]+")
-                if re.match(f"^{pattern}$", url_path):
-                    # For templates, we can't read the schema directly
-                    # Return a basic schema indicating the template exists
-                    return {
-                        "openapi": "3.0.0",
-                        "paths": {
-                            template_path: {"description": "Template-based resource"}
-                        },
-                    }
+            # Check if URL matches template pattern using FastMCP's match_uri_template
+            if match_uri_template(url, template_uri):
+                # For template instances, access the template's meta directly
+                if hasattr(template, "meta") and isinstance(template.meta, dict):
+                    return template.meta
+                return None
 
         return None
 
-    def _validate_method_supported(
-        self, method: str, url: str, schema: dict[str, Any]
-    ) -> None:
-        """Validate that the HTTP method is supported for the given URL schema."""
+    def _is_method_supported(self, method: str, schema: dict[str, Any]) -> bool:
+        """Check if the HTTP method is supported in the OpenAPI schema."""
         paths = schema.get("paths", {})
         for path, operations in paths.items():
-            if method.lower() not in operations:
-                available_methods = [
-                    m.upper() for m in operations.keys() if m != "description"
-                ]
-                raise ValueError(
-                    f"Method {method} not supported for {url}. "
-                    f"Available methods: {', '.join(available_methods)}"
-                )
-            logger.debug(
-                f"Found OpenAPI schema for {url}, method {method} is supported"
-            )
+            if isinstance(operations, dict) and method.lower() in operations:
+                logger.debug(f"Found OpenAPI schema with {method} method supported")
+                return True
+        return False
 
     def _build_request_args(
         self,
@@ -494,7 +507,21 @@ class McpWebGateway(FastMCPOpenAPI):
             # Try to read resource schema first
             schema = await self._read_resource_schema(url)
             if schema:
-                self._validate_method_supported(method, url, schema)
+                if not self._is_method_supported(method, schema):
+                    # Get available methods for error message
+                    paths = schema.get("paths", {})
+                    available_methods: set[str] = set()
+                    for path, operations in paths.items():
+                        if isinstance(operations, dict):
+                            available_methods.update(
+                                m.upper()
+                                for m in operations.keys()
+                                if m != "description"
+                            )
+                    raise ValueError(
+                        f"Method {method} not supported for {url}. "
+                        f"Available methods: {', '.join(sorted(available_methods))}"
+                    )
             elif not open_world:
                 # In closed-world mode, we require the URL to match a known resource
                 raise ValueError(f"URL '{url}' does not match any known resource")
@@ -517,6 +544,115 @@ class McpWebGateway(FastMCPOpenAPI):
 
         except httpx.RequestError as e:
             raise ValueError(f"Request error: {str(e)}")
+
+    async def _execute_options_method(
+        self,
+        url: str,
+        params: dict[str, Any] | None = None,
+        open_world: bool = False,
+    ) -> ToolResult:
+        """Execute OPTIONS request with special handling for schema discovery.
+
+        Priority:
+        1. If OPTIONS method is defined in schema, execute it
+        2. If exact resource match, return OpenAPI schema
+        3. If prefix match, return list of matching routes
+        4. If open-world mode, execute OPTIONS directly
+        5. Otherwise, raise error
+        """
+        # Check if resource exists and get its schema
+        schema = await self._read_resource_schema(url)
+
+        if schema:
+            # Check if OPTIONS method is explicitly defined
+            if self._is_method_supported("OPTIONS", schema):
+                logger.debug(f"OPTIONS method defined for {url}, executing request")
+                return await self._execute_rest_method(
+                    "OPTIONS", url, params=params, open_world=open_world
+                )
+
+            # No OPTIONS method defined, return the schema for exact match
+            logger.debug(f"Returning OpenAPI schema for {url}")
+            return ToolResult(structured_content=schema)
+
+        # No exact match, try prefix matching
+        matching_routes = self._find_matching_routes(url)
+
+        if matching_routes:
+            logger.debug(f"Found {len(matching_routes)} routes matching prefix: {url}")
+            return self._create_prefix_match_result(matching_routes, url)
+
+        # Handle open-world mode
+        if open_world:
+            logger.warning(
+                f"No resource found for {url}, attempting direct OPTIONS request in open-world mode"
+            )
+            return await self._execute_rest_method(
+                "OPTIONS", url, params=params, open_world=True
+            )
+
+        # No matches found in closed-world mode
+        raise ValueError(f"No resources found matching URL: {url}")
+
+    def _create_prefix_match_result(
+        self, matching_routes: list[dict[str, Any]], url: str
+    ) -> ToolResult:
+        """Create a structured result for prefix matching."""
+        return ToolResult(
+            structured_content={
+                "matching_routes": matching_routes,
+                "description": f"Routes matching prefix: {url}",
+                "count": len(matching_routes),
+            }
+        )
+
+    def _find_matching_routes(self, url_prefix: str) -> list[dict[str, Any]]:
+        """Find all routes that match the given URL prefix.
+
+        Returns routes sorted by URL length (most specific first).
+        """
+        matching = []
+
+        # Find matching resources using PathMatcher
+        resource_paths = PathMatcher.find_matching_paths(
+            self._resource_manager._resources, url_prefix
+        )
+        for resource_url in resource_paths:
+            resource = self._resource_manager._resources[resource_url]
+            # WebResource has _routes attribute
+            if hasattr(resource, "_routes"):
+                methods = [route.method for route in resource._routes]
+                matching.append(
+                    PathMatcher.create_route_info(resource_url, methods, "resource")
+                )
+
+        # Find matching templates using PathMatcher
+        template_paths = PathMatcher.find_matching_paths(
+            self._resource_manager._templates, url_prefix
+        )
+        for template_url in template_paths:
+            template = self._resource_manager._templates[template_url]
+            # WebResourceTemplate has _routes attribute
+            if hasattr(template, "_routes"):
+                methods = [route.method for route in template._routes]
+                matching.append(
+                    PathMatcher.create_route_info(template_url, methods, "template")
+                )
+
+        # Sort by breadth-first lexicographical order
+        # First by depth (number of path segments), then lexicographically
+        def sort_key(route_info: dict[str, Any]) -> tuple[int, str]:
+            url = route_info["url"]
+            # Remove the base URL to get just the path
+            path = url.replace(self.base_url, "")
+            # Count the depth (number of segments)
+            depth = path.count("/")
+            # Return tuple for sorting: (depth, url)
+            return (depth, url)
+
+        matching.sort(key=sort_key)
+
+        return matching
 
     @property
     def base_url(self) -> str:

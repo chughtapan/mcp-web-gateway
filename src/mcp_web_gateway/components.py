@@ -7,91 +7,48 @@ approach where resources represent API endpoints but don't execute them directly
 import json
 from typing import Any
 
-import httpx
-from fastmcp.experimental.server.openapi.components import (
-    OpenAPIResource as BaseOpenAPIResource,
-)
-from fastmcp.experimental.server.openapi.components import (
-    OpenAPIResourceTemplate as BaseOpenAPIResourceTemplate,
-)
 from fastmcp.experimental.utilities.openapi import HTTPRoute
-from fastmcp.experimental.utilities.openapi.director import RequestDirector
+from fastmcp.resources import Resource, ResourceTemplate
 from fastmcp.server import Context
+from pydantic.networks import AnyUrl
 
 
-class WebResource(BaseOpenAPIResource):
+class WebResource(Resource):
     """Resource that represents a web API endpoint and returns its OpenAPI schema."""
 
     def __init__(
         self,
-        client: httpx.AsyncClient,
         route: HTTPRoute,
-        director: RequestDirector,
         uri: str,
         name: str,
         description: str,
         mime_type: str = "application/json",
         tags: set[str] = set(),
-        timeout: float | None = None,
+        meta: dict[str, Any] | None = None,
     ):
+        # Initialize base class
         super().__init__(
-            client=client,
-            route=route,
-            director=director,
-            uri=uri,
+            uri=AnyUrl(uri),
             name=name,
             description=description,
             mime_type=mime_type,
             tags=tags,
-            timeout=timeout,
+            meta=meta,
         )
         # Store all routes for this URL
         self._routes = [route]
 
     async def read(self) -> str | bytes:
         """Return OpenAPI schema for all methods available at this URL."""
-        schema = self._build_openapi_schema(self._routes[0].path)
-        return json.dumps(schema, indent=2)
+        return json.dumps(self.meta, indent=2)
 
-    def _build_operation_schema(self, route: HTTPRoute) -> dict[str, Any]:
-        """Build OpenAPI operation schema for a single route."""
-        operation: dict[str, Any] = {
-            "operationId": route.operation_id,
-            "summary": route.summary,
-            "description": route.description,
-            "tags": list(route.tags) if route.tags else [],
-        }
+    def add_route(self, route: HTTPRoute, method_schema: dict[str, Any]) -> None:
+        """Add a new route to this resource with its pre-extracted method schema.
 
-        # Add parameters
-        if route.parameters:
-            operation["parameters"] = [p.model_dump() for p in route.parameters]
-
-        # Add request body
-        if route.request_body:
-            operation["requestBody"] = route.request_body.model_dump()
-
-        # Add responses
-        if route.responses:
-            operation["responses"] = {
-                str(code): resp.model_dump() for code, resp in route.responses.items()
-            }
-
-        return operation
-
-    def _build_openapi_schema(self, resource_path: str) -> dict[str, Any]:
-        """Build the complete OpenAPI schema for this resource."""
-        schema: dict[str, Any] = {"openapi": "3.0.0", "paths": {resource_path: {}}}
-
-        # Build operations for each method
-        path_item: dict[str, Any] = schema["paths"][resource_path]
-        for route in self._routes:
-            operation = self._build_operation_schema(route)
-            path_item[route.method.lower()] = operation
-
-        return schema
-
-    def add_route(self, route: HTTPRoute) -> None:
-        """Add a new route to this resource."""
+        Args:
+            route: The HTTPRoute to add
+            method_schema: Pre-extracted OpenAPI schema for this method
+        """
         # Check if this method already exists
         existing_methods = {r.method for r in self._routes}
         if route.method not in existing_methods:
@@ -99,33 +56,32 @@ class WebResource(BaseOpenAPIResource):
             # Update tags if the new route has tags
             if route.tags:
                 self.tags.update(route.tags)
+            # Update the schema to include the new method
+            path = self._routes[0].path
+            if self.meta and path in self.meta.get("paths", {}):
+                self.meta["paths"][path][route.method.lower()] = method_schema
 
 
-class WebResourceTemplate(BaseOpenAPIResourceTemplate):
+class WebResourceTemplate(ResourceTemplate):
     """Resource template that creates web resources."""
 
     def __init__(
         self,
-        client: httpx.AsyncClient,
         route: HTTPRoute,
-        director: RequestDirector,
         uri_template: str,
         name: str,
         description: str,
         parameters: dict[str, Any],
         tags: set[str] = set(),
-        timeout: float | None = None,
+        meta: dict[str, Any] | None = None,
     ):
         super().__init__(
-            client=client,
-            route=route,
-            director=director,
             uri_template=uri_template,
             name=name,
             description=description,
             parameters=parameters,
             tags=tags,
-            timeout=timeout,
+            meta=meta,
         )
         # Store all routes for this URL template
         self._routes = [route]
@@ -142,27 +98,38 @@ class WebResourceTemplate(BaseOpenAPIResourceTemplate):
         for key, value in params.items():
             uri_parts.append(f"{key}={value}")
 
-        # Create a web resource with the first route
+        # Create a web resource with the first route and same schema
         resource = WebResource(
-            client=self._client,
             route=self._routes[0],
-            director=self._director,
-            uri=uri,
+            uri=str(uri),  # Convert AnyUrl to string
             name=f"{self.name}-{'-'.join(uri_parts)}",
             description=self.description or f"Resource for {self._routes[0].path}",
             mime_type="application/json",
             tags=set(self._routes[0].tags or []),
-            timeout=self._timeout,
+            meta=self.meta.copy() if self.meta else {},
         )
 
         # Add remaining routes if any
         for route in self._routes[1:]:
-            resource.add_route(route)
+            # Extract method schema from our meta
+            path = route.path
+            method = route.method.lower()
+            method_schema = (
+                self.meta.get("paths", {}).get(path, {}).get(method, {})
+                if self.meta
+                else {}
+            )
+            resource.add_route(route, method_schema)
 
         return resource
 
-    def add_route(self, route: HTTPRoute) -> None:
-        """Add a new route to this template."""
+    def add_route(self, route: HTTPRoute, method_schema: dict[str, Any]) -> None:
+        """Add a new route to this template with its pre-extracted method schema.
+
+        Args:
+            route: The HTTPRoute to add
+            method_schema: Pre-extracted OpenAPI schema for this method
+        """
         # Check if this method already exists
         existing_methods = {r.method for r in self._routes}
         if route.method not in existing_methods:
@@ -170,6 +137,10 @@ class WebResourceTemplate(BaseOpenAPIResourceTemplate):
             # Update tags if the new route has tags
             if route.tags:
                 self.tags.update(route.tags)
+            # Update the schema to include the new method
+            path = self._routes[0].path
+            if self.meta and path in self.meta.get("paths", {}):
+                self.meta["paths"][path][route.method.lower()] = method_schema
 
 
 __all__ = [
