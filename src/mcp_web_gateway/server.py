@@ -63,9 +63,19 @@ class McpWebGateway(FastMCPOpenAPI):
         client: httpx.AsyncClient,
         name: str | None = None,
         add_rest_tools: bool = True,
+        open_world: bool = False,
         **settings: Any,
     ):
-        """Initialize an MCP Web Gateway server from an OpenAPI schema."""
+        """Initialize an MCP Web Gateway server from an OpenAPI schema.
+
+        Args:
+            openapi_spec: OpenAPI specification dictionary
+            client: HTTP client for making requests
+            name: Optional name for the server
+            add_rest_tools: Whether to automatically add REST tools (default True)
+            open_world: Whether REST tools can access URLs outside defined resources (default False)
+            **settings: Additional settings passed to parent class
+        """
         # Check for unsupported settings
         self._check_unsupported_settings(**settings)
 
@@ -82,7 +92,7 @@ class McpWebGateway(FastMCPOpenAPI):
 
         # Add the generic REST tools if requested
         if add_rest_tools:
-            self.add_rest_tools()
+            self.add_rest_tools(open_world)
 
         logger.info(
             f"Created MCP Web Gateway server with {len(self._resource_manager._resources)} resources "
@@ -101,6 +111,7 @@ class McpWebGateway(FastMCPOpenAPI):
         httpx_client_kwargs: dict[str, Any] | None = None,
         tags: set[str] | None = None,
         add_rest_tools: bool = True,
+        open_world: bool = False,
         **settings: Any,
     ) -> "McpWebGateway":
         """Create an MCP Web Gateway from a FastAPI application.
@@ -118,6 +129,7 @@ class McpWebGateway(FastMCPOpenAPI):
             httpx_client_kwargs: Optional kwargs for httpx.AsyncClient
             tags: Optional tags to add to all components
             add_rest_tools: Whether to automatically add REST tools (default True)
+            open_world: Whether REST tools can access URLs outside defined resources (default False)
             **settings: Additional settings passed to McpWebGateway
 
         Returns:
@@ -157,6 +169,7 @@ class McpWebGateway(FastMCPOpenAPI):
             tags=tags,
             mcp_names=mcp_names,
             add_rest_tools=add_rest_tools,
+            open_world=open_world,
             **settings,
         )
 
@@ -300,8 +313,12 @@ class McpWebGateway(FastMCPOpenAPI):
                 f"Registered Web Template: {uri_template} ({route.method} {route.path})"
             )
 
-    def add_rest_tools(self) -> None:
-        """Add the generic REST tools to the server."""
+    def add_rest_tools(self, open_world: bool = False) -> None:
+        """Add the generic REST tools to the server.
+
+        Args:
+            open_world: Whether REST tools can access URLs outside defined resources (default False)
+        """
 
         async def execute_request(
             method: str,
@@ -311,12 +328,13 @@ class McpWebGateway(FastMCPOpenAPI):
         ) -> ToolResult:
             """Common logic for executing REST requests."""
             return await self._execute_rest_method(
-                method, url, body=body, params=params
+                method, url, body=body, params=params, open_world=open_world
             )
 
         @self.tool(
             name="GET",
             description="Execute a GET request on a URL. First reads the resource to get OpenAPI schema, then executes the request.",
+            annotations={"openWorldHint": open_world},
         )
         async def get_tool(url: str, params: dict[str, Any] | None = None) -> Any:
             return await execute_request("GET", url, params=params)
@@ -324,6 +342,7 @@ class McpWebGateway(FastMCPOpenAPI):
         @self.tool(
             name="POST",
             description="Execute a POST request on a URL. First reads the resource to get OpenAPI schema, then executes the request.",
+            annotations={"openWorldHint": open_world},
         )
         async def post_tool(
             url: str,
@@ -335,6 +354,7 @@ class McpWebGateway(FastMCPOpenAPI):
         @self.tool(
             name="PUT",
             description="Execute a PUT request on a URL. First reads the resource to get OpenAPI schema, then executes the request.",
+            annotations={"openWorldHint": open_world},
         )
         async def put_tool(
             url: str,
@@ -346,6 +366,7 @@ class McpWebGateway(FastMCPOpenAPI):
         @self.tool(
             name="PATCH",
             description="Execute a PATCH request on a URL. First reads the resource to get OpenAPI schema, then executes the request.",
+            annotations={"openWorldHint": open_world},
         )
         async def patch_tool(
             url: str,
@@ -357,6 +378,7 @@ class McpWebGateway(FastMCPOpenAPI):
         @self.tool(
             name="DELETE",
             description="Execute a DELETE request on a URL. First reads the resource to get OpenAPI schema, then executes the request.",
+            annotations={"openWorldHint": open_world},
         )
         async def delete_tool(url: str, params: dict[str, Any] | None = None) -> Any:
             return await execute_request("DELETE", url, params=params)
@@ -465,6 +487,7 @@ class McpWebGateway(FastMCPOpenAPI):
         url: str,
         body: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        open_world: bool = False,
     ) -> ToolResult:
         """Execute a REST request for the specified URL."""
         try:
@@ -472,9 +495,12 @@ class McpWebGateway(FastMCPOpenAPI):
             schema = await self._read_resource_schema(url)
             if schema:
                 self._validate_method_supported(method, url, schema)
+            elif not open_world:
+                # In closed-world mode, we require the URL to match a known resource
+                raise ValueError(f"URL '{url}' does not match any known resource")
             else:
                 logger.warning(
-                    f"No resource found for {url}, proceeding with direct request"
+                    f"No resource found for {url}, proceeding with direct request in open-world mode"
                 )
 
             # Build and execute the request

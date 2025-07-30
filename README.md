@@ -156,6 +156,24 @@ The `agent/instructions.md` file contains an initial set of instructions for LLM
 
 ## Advanced Usage
 
+### Open World Mode
+
+By default, the gateway operates in "closed world" mode where REST tools can only access URLs that correspond to defined resources in your OpenAPI specification. This provides safety by preventing access to arbitrary URLs.
+
+You can enable "open world" mode to allow REST tools to access any URL:
+
+```python
+# Enable open world mode - REST tools can access any URL
+mcp = McpWebGateway.from_fastapi(app, open_world=True)
+
+# Or with OpenAPI spec
+mcp = McpWebGateway(openapi_spec, client, open_world=True)
+```
+
+This is useful when you want to use the gateway as a general HTTP client;
+
+The `open_world` setting is reflected in the tool annotations as `openWorldHint`, allowing MCP clients to understand the tool's behavior.
+
 ### Adding Custom Tools
 
 By default, the gateway automatically adds REST tools (GET, POST, PUT, PATCH, DELETE). You can disable this and add your own custom tools:

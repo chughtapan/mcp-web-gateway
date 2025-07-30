@@ -550,3 +550,138 @@ class TestMcpWebGatewayEdgeCases:
 
             # Should get HTTP error, not resource not found
             assert "HTTP error 404" in str(exc_info.value)
+
+
+class TestOpenWorldBehavior:
+    """Test open_world parameter behavior for REST tools."""
+
+    @pytest.fixture
+    def minimal_spec(self):
+        """Create a minimal OpenAPI spec with one resource."""
+        return {
+            "openapi": "3.0.0",
+            "info": {"title": "Test API", "version": "1.0"},
+            "paths": {
+                "/users": {
+                    "get": {
+                        "operationId": "list_users",
+                        "responses": {"200": {"description": "Success"}},
+                    }
+                }
+            },
+        }
+
+    async def test_closed_world_blocks_unknown_resources(self, minimal_spec):
+        """Test that closed-world mode (default) blocks access to unknown resources."""
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://api.example.com"
+
+        # Create server with default open_world=False
+        server = McpWebGateway(minimal_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            # Try to access a resource that doesn't exist in the spec
+            with pytest.raises(Exception) as exc_info:
+                await mcp_client.call_tool(
+                    "GET", {"url": "https://api.example.com/unknown"}
+                )
+
+            # Should get a clear error about resource not found
+            error_msg = str(exc_info.value)
+            assert "does not match any known resource" in error_msg
+
+    async def test_open_world_allows_unknown_resources(self, minimal_spec):
+        """Test that open-world mode allows access to any URL."""
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"data": "from unknown resource"}
+        mock_response.raise_for_status = Mock()
+
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://api.example.com"
+        mock_client.request = AsyncMock(return_value=mock_response)
+
+        # Create server with open_world=True
+        server = McpWebGateway(minimal_spec, mock_client, open_world=True)
+
+        async with Client(server) as mcp_client:
+            # Should be able to access a resource not in the spec
+            result = await mcp_client.call_tool(
+                "GET", {"url": "https://api.example.com/unknown"}
+            )
+
+            assert result.structured_content == {"data": "from unknown resource"}
+
+            # Verify the request was made
+            mock_client.request.assert_called_once_with(
+                method="GET",
+                url="https://api.example.com/unknown",
+            )
+
+    async def test_tool_annotations_reflect_open_world_setting(self, minimal_spec):
+        """Test that tool annotations correctly reflect the open_world setting."""
+        # Create a proper mock client with base_url
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://api.example.com"
+
+        # Test with default (closed world)
+        server_closed = McpWebGateway(minimal_spec, mock_client)
+        async with Client(server_closed) as mcp_client:
+            tools = await mcp_client.list_tools()
+            get_tool = next(t for t in tools if t.name == "GET")
+            assert get_tool.annotations is not None
+            assert get_tool.annotations.openWorldHint is False
+
+        # Test with open world
+        server_open = McpWebGateway(minimal_spec, mock_client, open_world=True)
+        async with Client(server_open) as mcp_client:
+            tools = await mcp_client.list_tools()
+            get_tool = next(t for t in tools if t.name == "GET")
+            assert get_tool.annotations is not None
+            assert get_tool.annotations.openWorldHint is True
+
+    async def test_from_fastapi_respects_open_world_parameter(self):
+        """Test that from_fastapi method respects the open_world parameter."""
+        from fastapi import FastAPI
+
+        app = FastAPI()
+
+        @app.get("/test")
+        def test_endpoint():
+            return {"message": "test"}
+
+        # Create with default (closed world)
+        mcp_closed = McpWebGateway.from_fastapi(app)
+        async with Client(mcp_closed) as mcp_client:
+            tools = await mcp_client.list_tools()
+            get_tool = next(t for t in tools if t.name == "GET")
+            assert get_tool.annotations.openWorldHint is False
+
+        # Create with open world
+        mcp_open = McpWebGateway.from_fastapi(app, open_world=True)
+        async with Client(mcp_open) as mcp_client:
+            tools = await mcp_client.list_tools()
+            get_tool = next(t for t in tools if t.name == "GET")
+            assert get_tool.annotations.openWorldHint is True
+
+    async def test_closed_world_with_no_resources_shows_helpful_message(self):
+        """Test that closed-world mode with no resources shows a helpful error message."""
+        empty_spec = {
+            "openapi": "3.0.0",
+            "info": {"title": "Empty API", "version": "1.0"},
+            "paths": {},
+        }
+
+        mock_client = AsyncMock()
+        mock_client.base_url = "https://api.example.com"
+
+        server = McpWebGateway(empty_spec, mock_client)
+
+        async with Client(server) as mcp_client:
+            with pytest.raises(Exception) as exc_info:
+                await mcp_client.call_tool(
+                    "GET", {"url": "https://api.example.com/anything"}
+                )
+
+            error_msg = str(exc_info.value)
+            assert "does not match any known resource" in error_msg

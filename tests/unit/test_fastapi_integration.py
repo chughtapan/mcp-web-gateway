@@ -620,3 +620,119 @@ class TestFastAPIMethodInvocation:
         assert invocations[1] == ("POST", "/items")
         assert invocations[2] == ("GET", f"/items/{item_id}")
         assert invocations[3] == ("DELETE", f"/items/{item_id}")
+
+
+class TestOpenWorldIntegration:
+    """Test open_world parameter with FastAPI integration."""
+
+    @pytest.fixture
+    def simple_app(self):
+        """Create a simple FastAPI app with limited endpoints."""
+        app = FastAPI()
+
+        @app.get("/known")
+        def get_known():
+            return {"message": "This is a known endpoint"}
+
+        return app
+
+    async def test_closed_world_blocks_unknown_endpoints(self, simple_app):
+        """Test that closed-world mode blocks access to endpoints not in OpenAPI spec."""
+        # Create gateway with default closed-world mode
+        mcp = McpWebGateway.from_fastapi(simple_app)
+
+        async with Client(mcp) as client:
+            # Should be able to access known endpoint
+            result = await client.call_tool("GET", {"url": "http://fastapi/known"})
+            assert result.structured_content == {"message": "This is a known endpoint"}
+
+            # Should NOT be able to access unknown endpoint
+            with pytest.raises(Exception) as exc_info:
+                await client.call_tool("GET", {"url": "http://fastapi/unknown"})
+
+            error_msg = str(exc_info.value)
+            assert "does not match any known resource" in error_msg
+
+    async def test_open_world_allows_unknown_endpoints(self, simple_app):
+        """Test that open-world mode allows access to any endpoint."""
+
+        # Add a handler that catches all routes for testing
+        @simple_app.get("/{path:path}")
+        def catch_all(path: str):
+            return {"message": f"Caught unknown path: {path}"}
+
+        # Create gateway with open-world mode
+        mcp = McpWebGateway.from_fastapi(simple_app, open_world=True)
+
+        async with Client(mcp) as client:
+            # Should be able to access known endpoint
+            result = await client.call_tool("GET", {"url": "http://fastapi/known"})
+            assert result.structured_content == {"message": "This is a known endpoint"}
+
+            # Should ALSO be able to access unknown endpoint
+            result = await client.call_tool(
+                "GET", {"url": "http://fastapi/totally/unknown/path"}
+            )
+            assert result.structured_content == {
+                "message": "Caught unknown path: totally/unknown/path"
+            }
+
+    async def test_open_world_with_method_tracking(self, fastapi_app):
+        """Test open-world mode with method tracking."""
+        tracker = MethodTracker()
+
+        # Add middleware to track methods
+        @fastapi_app.middleware("http")
+        async def track_methods(request: Request, call_next):
+            tracker.track(request.method, request.url.path)
+            response = await call_next(request)
+            return response
+
+        # Add a catch-all route
+        @fastapi_app.get("/{path:path}")
+        def catch_all(path: str):
+            return {"message": f"Unknown path: {path}"}
+
+        # Create gateway with open-world mode
+        mcp = McpWebGateway.from_fastapi(fastapi_app, open_world=True)
+
+        async with Client(mcp) as client:
+            tracker.clear()
+
+            # Access known endpoint
+            await client.call_tool("GET", {"url": "http://fastapi/items"})
+
+            # Access unknown endpoint
+            await client.call_tool("GET", {"url": "http://fastapi/unknown/endpoint"})
+
+            # Verify both were called
+            invocations = tracker.get_invocations()
+            assert len(invocations) == 2
+            assert invocations[0] == ("GET", "/items")
+            assert invocations[1] == ("GET", "/unknown/endpoint")
+
+    async def test_all_rest_tools_respect_open_world_setting(self, simple_app):
+        """Test that all REST tools (GET, POST, PUT, PATCH, DELETE) respect open_world."""
+        # Create gateway with closed world
+        mcp_closed = McpWebGateway.from_fastapi(simple_app)
+
+        async with Client(mcp_closed) as client:
+            tools = await client.list_tools()
+
+            # Verify all REST tools have openWorldHint=False
+            for tool_name in ["GET", "POST", "PUT", "PATCH", "DELETE"]:
+                tool = next(t for t in tools if t.name == tool_name)
+                assert tool.annotations is not None
+                assert tool.annotations.openWorldHint is False
+
+        # Create gateway with open world
+        mcp_open = McpWebGateway.from_fastapi(simple_app, open_world=True)
+
+        async with Client(mcp_open) as client:
+            tools = await client.list_tools()
+
+            # Verify all REST tools have openWorldHint=True
+            for tool_name in ["GET", "POST", "PUT", "PATCH", "DELETE"]:
+                tool = next(t for t in tools if t.name == tool_name)
+                assert tool.annotations is not None
+                assert tool.annotations.openWorldHint is True
