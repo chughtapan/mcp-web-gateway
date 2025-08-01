@@ -1,149 +1,164 @@
 """Web resource component implementations.
 
-These components extend the base OpenAPI components to support the web gateway
-approach where resources represent API endpoints but don't execute them directly.
+These components extend the base Resource/ResourceTemplate to provide
+OpenAPI schema on read() operations.
 """
 
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fastmcp.experimental.utilities.openapi import HTTPRoute
 from fastmcp.resources import Resource, ResourceTemplate
 from fastmcp.server import Context
+from fastmcp.utilities.openapi import HttpMethod
 from pydantic.networks import AnyUrl
 
+if TYPE_CHECKING:
+    from .openapi_handler import OpenAPIHandler
 
-class WebResource(Resource):
-    """Resource that represents a web API endpoint and returns its OpenAPI schema."""
+
+class HttpComponentBase:
+    """Base class for HTTP components with shared properties."""
+
+    def __init__(
+        self, path: str, methods: list[HttpMethod], openapi_handler: "OpenAPIHandler"
+    ):
+        """Initialize base web component.
+
+        Args:
+            path: OpenAPI path (e.g., "/users")
+            methods: List of HTTP methods available
+            openapi_handler: Handler for OpenAPI operations
+        """
+        self._path = path
+        self._methods = methods
+        self._openapi_handler = openapi_handler
+
+    @property
+    def path(self) -> str:
+        """Get the OpenAPI path for this component."""
+        return self._path
+
+    @property
+    def methods(self) -> list[HttpMethod]:
+        """Get the HTTP methods for this component."""
+        return self._methods
+
+
+class HttpResource(Resource, HttpComponentBase):
+    """Resource that represents an HTTP API endpoint and returns its OpenAPI schema."""
 
     def __init__(
         self,
-        route: HTTPRoute,
         uri: str,
+        path: str,
+        methods: list[HttpMethod],
         name: str,
         description: str,
-        mime_type: str = "application/json",
-        tags: set[str] = set(),
-        meta: dict[str, Any] | None = None,
+        tags: set[str],
+        openapi_handler: "OpenAPIHandler",
     ):
-        # Initialize base class
-        super().__init__(
+        """Initialize a web resource.
+
+        Args:
+            uri: Full URI for this resource (e.g., "https://api.example.com/users")
+            path: OpenAPI path (e.g., "/users")
+            methods: List of HTTP methods available
+            name: Resource name
+            description: Resource description
+            tags: Set of tags
+            openapi_handler: Handler for OpenAPI operations
+        """
+        # Initialize Resource
+        Resource.__init__(
+            self,
             uri=AnyUrl(uri),
             name=name,
             description=description,
-            mime_type=mime_type,
+            mime_type="application/json",
             tags=tags,
-            meta=meta,
         )
-        # Store all routes for this URL
-        self._routes = [route]
+        # Initialize HttpComponentBase
+        HttpComponentBase.__init__(self, path, methods, openapi_handler)
 
-    async def read(self) -> str | bytes:
+    async def read(self) -> str:
         """Return OpenAPI schema for all methods available at this URL."""
-        return json.dumps(self.meta, indent=2)
-
-    def add_route(self, route: HTTPRoute, method_schema: dict[str, Any]) -> None:
-        """Add a new route to this resource with its pre-extracted method schema.
-
-        Args:
-            route: The HTTPRoute to add
-            method_schema: Pre-extracted OpenAPI schema for this method
-        """
-        # Check if this method already exists
-        existing_methods = {r.method for r in self._routes}
-        if route.method not in existing_methods:
-            self._routes.append(route)
-            # Update tags if the new route has tags
-            if route.tags:
-                self.tags.update(route.tags)
-            # Update the schema to include the new method
-            path = self._routes[0].path
-            if self.meta and path in self.meta.get("paths", {}):
-                self.meta["paths"][path][route.method.lower()] = method_schema
+        schema = self._openapi_handler.get_operation_schema(self._path, self._methods)
+        return json.dumps(schema, indent=2)
 
 
-class WebResourceTemplate(ResourceTemplate):
-    """Resource template that creates web resources."""
+class HttpResourceTemplate(ResourceTemplate, HttpComponentBase):
+    """Resource template for HTTP paths with parameters."""
 
     def __init__(
         self,
-        route: HTTPRoute,
         uri_template: str,
+        path: str,
+        methods: list[HttpMethod],
         name: str,
         description: str,
         parameters: dict[str, Any],
-        tags: set[str] = set(),
-        meta: dict[str, Any] | None = None,
+        tags: set[str],
+        openapi_handler: "OpenAPIHandler",
     ):
-        super().__init__(
+        """Initialize a web resource template.
+
+        Args:
+            uri_template: URI template with {param} placeholders
+            path: OpenAPI path template (e.g., "/users/{id}")
+            methods: List of HTTP methods available
+            name: Template name
+            description: Template description
+            parameters: JSON Schema for path parameters
+            tags: Set of tags
+            openapi_handler: Handler for OpenAPI operations
+        """
+        # Initialize ResourceTemplate
+        ResourceTemplate.__init__(
+            self,
             uri_template=uri_template,
             name=name,
             description=description,
             parameters=parameters,
             tags=tags,
-            meta=meta,
         )
-        # Store all routes for this URL template
-        self._routes = [route]
+        # Initialize HttpComponentBase
+        HttpComponentBase.__init__(self, path, methods, openapi_handler)
+
+    async def read(self, arguments: dict[str, Any] | None = None) -> str:
+        """Return OpenAPI schema for all methods available at this template URL."""
+        schema = self._openapi_handler.get_operation_schema(self._path, self._methods)
+        return json.dumps(schema, indent=2)
 
     async def create_resource(
         self,
         uri: str,
         params: dict[str, Any],
         context: Context | None = None,
-    ) -> WebResource:
-        """Create a web resource with the given parameters."""
-        # Generate a descriptive name for this resource instance
-        uri_parts = []
-        for key, value in params.items():
-            uri_parts.append(f"{key}={value}")
+    ) -> HttpResource:
+        """Create an HTTP resource instance from this template.
 
-        # Create a web resource with the first route and same schema
-        resource = WebResource(
-            route=self._routes[0],
-            uri=str(uri),  # Convert AnyUrl to string
-            name=f"{self.name}-{'-'.join(uri_parts)}",
-            description=self.description or f"Resource for {self._routes[0].path}",
-            mime_type="application/json",
-            tags=set(self._routes[0].tags or []),
-            meta=self.meta.copy() if self.meta else {},
+        Args:
+            uri: Concrete URI with parameters filled in
+            params: Parameter values used to create the URI
+            context: Optional context
+
+        Returns:
+            HttpResource instance
+        """
+        # Generate a descriptive name
+        param_parts = [f"{k}={v}" for k, v in params.items()]
+
+        resource = HttpResource(
+            uri=str(uri),
+            path=self._path,  # Keep template path for schema extraction
+            methods=self._methods,
+            name=f"{self.name}-{'-'.join(param_parts)}",
+            description=f"Resource instance of {self._path}",
+            tags=self.tags.copy(),
+            openapi_handler=self._openapi_handler,
         )
-
-        # Add remaining routes if any
-        for route in self._routes[1:]:
-            # Extract method schema from our meta
-            path = route.path
-            method = route.method.lower()
-            method_schema = (
-                self.meta.get("paths", {}).get(path, {}).get(method, {})
-                if self.meta
-                else {}
-            )
-            resource.add_route(route, method_schema)
 
         return resource
 
-    def add_route(self, route: HTTPRoute, method_schema: dict[str, Any]) -> None:
-        """Add a new route to this template with its pre-extracted method schema.
 
-        Args:
-            route: The HTTPRoute to add
-            method_schema: Pre-extracted OpenAPI schema for this method
-        """
-        # Check if this method already exists
-        existing_methods = {r.method for r in self._routes}
-        if route.method not in existing_methods:
-            self._routes.append(route)
-            # Update tags if the new route has tags
-            if route.tags:
-                self.tags.update(route.tags)
-            # Update the schema to include the new method
-            path = self._routes[0].path
-            if self.meta and path in self.meta.get("paths", {}):
-                self.meta["paths"][path][route.method.lower()] = method_schema
-
-
-__all__ = [
-    "WebResource",
-    "WebResourceTemplate",
-]
+__all__ = ["HttpResource", "HttpResourceTemplate"]

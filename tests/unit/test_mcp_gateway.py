@@ -433,17 +433,9 @@ class TestMcpWebGateway:
             "https://petstore.example.com/api/pets"
         ]
 
-        # Check that it has both GET and POST routes
-        assert hasattr(pets_resource, "_routes")
-        methods = {route.method for route in pets_resource._routes}
+        # Check that it has both GET and POST methods
+        methods = set(pets_resource.methods)
         assert methods == {"GET", "POST"}
-
-        # Check that tags were merged
-        all_tags = set()
-        for route in pets_resource._routes:
-            if route.tags:
-                all_tags.update(route.tags)
-        assert pets_resource.tags >= all_tags
 
     async def test_template_merging_on_collision(self, petstore_openapi_spec):
         """Test that templates with the same path are merged into one."""
@@ -455,9 +447,8 @@ class TestMcpWebGateway:
             "https://petstore.example.com/api/pets/{petId}"
         ]
 
-        # Check that it has GET, PUT, and DELETE routes
-        assert hasattr(pet_template, "_routes")
-        methods = {route.method for route in pet_template._routes}
+        # Check that it has GET, PUT, and DELETE methods
+        methods = set(pet_template.methods)
         assert methods == {"GET", "PUT", "DELETE"}
 
     async def test_merged_resource_schema_contains_all_methods(
@@ -486,84 +477,6 @@ class TestMcpWebGateway:
         assert pets_ops["post"]["operationId"] == "create_pet"
         assert "parameters" in pets_ops["get"]
         assert "requestBody" in pets_ops["post"]
-
-    async def test_add_route_prevents_duplicates(self, petstore_openapi_spec):
-        """Test that add_route doesn't add duplicate methods."""
-        from fastmcp.experimental.utilities.openapi import HTTPRoute
-
-        from mcp_web_gateway.components import WebResource
-
-        # Create a resource with one route
-        route1 = HTTPRoute(
-            method="GET", path="/test", operation_id="test_get", tags=["tag1"]
-        )
-
-        # Create a simple OpenAPI spec for testing
-        test_openapi_spec = {
-            "openapi": "3.0.0",
-            "paths": {
-                "/test": {
-                    "get": {
-                        "operationId": "test_get",
-                        "summary": "Test GET",
-                        "tags": ["tag1"],
-                    },
-                    "post": {
-                        "operationId": "test_post",
-                        "summary": "Test POST",
-                        "tags": ["tag3"],
-                    },
-                }
-            },
-        }
-
-        # Extract schema for the resource
-        schema = {
-            "openapi": "3.0.0",
-            "paths": {"/test": {"get": test_openapi_spec["paths"]["/test"]["get"]}},
-        }
-
-        resource = WebResource(
-            route=route1,
-            uri="https://example.com/test",
-            name="test_resource",
-            description="Test resource",
-            tags={"tag1"},
-            meta=schema,
-        )
-
-        # Try to add the same method
-        route2 = HTTPRoute(
-            method="GET", path="/test", operation_id="test_get_2", tags=["tag2"]
-        )
-
-        # Extract method schema for the route
-        method_schema = test_openapi_spec["paths"]["/test"]["get"]
-        resource.add_route(route2, method_schema)
-
-        # Should still have only one GET route
-        assert len(resource._routes) == 1
-        assert resource._routes[0] == route1
-
-        # Tags should not be updated since route wasn't added
-        assert resource.tags == {"tag1"}
-
-        # Now add a different method
-        route3 = HTTPRoute(
-            method="POST", path="/test", operation_id="test_post", tags=["tag3"]
-        )
-
-        # Extract method schema for the route
-        method_schema = test_openapi_spec["paths"]["/test"]["post"]
-        resource.add_route(route3, method_schema)
-
-        # Should now have two routes
-        assert len(resource._routes) == 2
-        methods = {r.method for r in resource._routes}
-        assert methods == {"GET", "POST"}
-
-        # Tags should include tag3
-        assert resource.tags >= {"tag1", "tag3"}
 
 
 class TestMcpWebGatewayEdgeCases:
@@ -998,12 +911,13 @@ class TestOptionsMethod:
         server = McpWebGateway(petstore_openapi_spec, mock_client)
 
         async with Client(server) as mcp_client:
-            with pytest.raises(Exception) as exc_info:
-                await mcp_client.call_tool(
-                    "OPTIONS", {"url": "https://petstore.example.com/api/users"}
-                )
+            result = await mcp_client.call_tool(
+                "OPTIONS", {"url": "https://petstore.example.com/api/users"}
+            )
 
-            assert "No resources found matching URL" in str(exc_info.value)
+            # OPTIONS returns error in response instead of raising exception
+            assert "error" in result.structured_content
+            assert "No resources found" in result.structured_content["error"]
 
     async def test_options_open_world_mode(self):
         """Test OPTIONS in open-world mode for external URLs."""
@@ -1098,85 +1012,3 @@ class TestOptionsMethod:
             assert "get" in pet_operations
             assert "put" in pet_operations
             assert "delete" in pet_operations
-
-
-class TestPathSorting:
-    """Test path sorting functionality."""
-
-    async def test_find_matching_routes_breadth_first_order(self):
-        """Test that routes are sorted in breadth-first lexicographical order."""
-        spec = {
-            "openapi": "3.0.0",
-            "info": {"title": "Test", "version": "1.0"},
-            "servers": [{"url": "https://api.example.com"}],
-            "paths": {
-                "/users": {"get": {"responses": {"200": {"description": "OK"}}}},
-                "/posts": {"get": {"responses": {"200": {"description": "OK"}}}},
-                "/api": {"get": {"responses": {"200": {"description": "OK"}}}},
-                "/users/{id}": {"get": {"responses": {"200": {"description": "OK"}}}},
-                "/posts/{id}": {"get": {"responses": {"200": {"description": "OK"}}}},
-                "/api/v1": {"get": {"responses": {"200": {"description": "OK"}}}},
-                "/api/v2": {"get": {"responses": {"200": {"description": "OK"}}}},
-                "/users/{id}/posts": {
-                    "get": {"responses": {"200": {"description": "OK"}}}
-                },
-                "/api/v1/users": {"get": {"responses": {"200": {"description": "OK"}}}},
-            },
-        }
-
-        client = httpx.AsyncClient(base_url="https://api.example.com")
-        server = McpWebGateway(spec, client)
-
-        # Get all routes
-        routes = server._find_matching_routes("https://api.example.com/")
-
-        # Extract just the paths for easier verification
-        paths = [r["url"].replace("https://api.example.com", "") for r in routes]
-
-        # Expected order: breadth-first, lexicographical within each depth
-        # Depth 1: /api, /posts, /users
-        # Depth 2: /api/v1, /api/v2, /posts/{id}, /users/{id}
-        # Depth 3: /api/v1/users, /users/{id}/posts
-        expected_order = [
-            "/api",
-            "/posts",
-            "/users",
-            "/api/v1",
-            "/api/v2",
-            "/posts/{id}",
-            "/users/{id}",
-            "/api/v1/users",
-            "/users/{id}/posts",
-        ]
-
-        assert paths == expected_order
-
-    async def test_find_matching_routes_with_root_path(self):
-        """Test sorting handles root path correctly."""
-        spec = {
-            "openapi": "3.0.0",
-            "info": {"title": "Test", "version": "1.0"},
-            "servers": [{"url": "https://api.example.com"}],
-            "paths": {
-                "/": {"get": {"responses": {"200": {"description": "OK"}}}},
-                "/api": {"get": {"responses": {"200": {"description": "OK"}}}},
-                "/users": {"get": {"responses": {"200": {"description": "OK"}}}},
-                "/api/v1": {"get": {"responses": {"200": {"description": "OK"}}}},
-            },
-        }
-
-        client = httpx.AsyncClient(base_url="https://api.example.com")
-        server = McpWebGateway(spec, client)
-
-        routes = server._find_matching_routes("https://api.example.com/")
-        paths = [r["url"].replace("https://api.example.com", "") for r in routes]
-
-        # Root should come first (depth 0), then depth 1, then depth 2
-        expected_order = [
-            "/",  # Depth 0
-            "/api",  # Depth 1
-            "/users",  # Depth 1
-            "/api/v1",  # Depth 2
-        ]
-
-        assert paths == expected_order

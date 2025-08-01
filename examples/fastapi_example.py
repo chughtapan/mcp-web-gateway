@@ -146,7 +146,5 @@ async def delete_todo(todo_id: int) -> None:
     del todos[todo_id]
 
 
-# Create MCP Web Gateway with proper base URL
-mcp = McpWebGateway.from_fastapi(
-    app, httpx_client_kwargs={"base_url": "http://localhost:8000"}
-)
+# Create MCP Web Gateway from FastAPI app
+mcp = McpWebGateway.from_fastapi(app)
