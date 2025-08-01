@@ -122,7 +122,10 @@ def create_web_gateway_server(
 
 # Load OpenAPI spec and create client
 openapi_spec = load_openapi_spec()
-client = httpx.AsyncClient(base_url="http://localhost:8080")
+# Add a fake API key header that ToolBench APIs expect
+client = httpx.AsyncClient(
+    base_url="http://localhost:8080", headers={"X-API-Key": "test_key"}
+)
 
 # Create appropriate MCP server based on strategy
 if strategy == "all-tools":

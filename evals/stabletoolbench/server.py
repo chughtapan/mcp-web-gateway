@@ -7,12 +7,15 @@ for each tool/API combination, making it compatible with MCP Web Gateway.
 
 import glob
 import json
+import keyword
 import os
-from typing import Any, Dict
+import re
+from typing import Any, Dict, List, Optional
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import create_model
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -65,15 +68,44 @@ def load_tool_definitions(toolenv_path: str) -> Dict[str, Any]:
     return tools
 
 
-def create_rest_endpoint(category: str, tool_name: str, api: dict, tool_data: dict):
-    """Create a REST endpoint function for a specific API"""
+def get_python_type(param_type: str, is_query_param: bool = False):
+    """Convert parameter type string to Python type.
 
-    # Standardize names
-    api_name = change_name(standardize(api["name"]))
-    method = api.get("method", "GET").upper()
+    Args:
+        param_type: The parameter type from the API definition (e.g., "string", "integer")
+        is_query_param: True if this is a query parameter (affects object handling)
 
-    async def endpoint(request: Request):
-        """Dynamic endpoint handler"""
+    Returns:
+        Tuple of (Python type object, type name as string for code generation)
+    """
+    # Map API parameter types to Python types
+    # First element is the actual type, second is the string representation for code generation
+    type_mapping = {
+        "string": (str, "str"),
+        "integer": (int, "int"),
+        "number": (float, "float"),
+        "boolean": (bool, "bool"),
+        "array": (List[Any], "List[Any]"),
+        "object": (Dict[str, Any], "Dict[str, Any]"),
+    }
+
+    # Handle uppercase types (some APIs use "String" instead of "string")
+    param_type_lower = param_type.lower() if param_type else "string"
+
+    # Special handling for query parameters:
+    # Objects in query strings must be serialized (e.g., as JSON strings)
+    if is_query_param and param_type_lower == "object":
+        return (str, "str")
+
+    # Default to string for unknown types (safer than failing)
+    return type_mapping.get(param_type_lower, (str, "str"))
+
+
+def create_endpoint_handler(category: str, tool_name: str, api: dict, tool_data: dict):
+    """Create the core handler logic that processes requests"""
+
+    async def handler(request: Request, tool_input: dict):
+        """Core endpoint handler logic"""
         # Get API key from header
         toolbench_key = request.headers.get("X-API-Key", "")
 
@@ -86,19 +118,6 @@ def create_rest_endpoint(category: str, tool_name: str, api: dict, tool_data: di
                     "message": "Invalid API key. Please provide a valid X-API-Key header.",
                 },
             )
-
-        # Prepare tool input based on method
-        if method in ["GET", "DELETE"]:
-            # Query parameters for GET/DELETE
-            tool_input = dict(request.query_params)
-        else:
-            # Body for POST/PUT/PATCH
-            body = await request.json()
-            tool_input = body if isinstance(body, dict) else {}
-
-        # Handle path parameters if any
-        if hasattr(request, "path_params"):
-            tool_input.update(request.path_params)
 
         # Create Info object for RapidAPI
         info = Info(
@@ -131,11 +150,318 @@ def create_rest_endpoint(category: str, tool_name: str, api: dict, tool_data: di
 
         return result
 
-    # Set function metadata for FastAPI
+    return handler
+
+
+def create_rest_endpoint(category: str, tool_name: str, api: dict, tool_data: dict):
+    """Create a REST endpoint function for a specific API"""
+
+    # Standardize names
+    api_name = change_name(standardize(api["name"]))
+    method = api.get("method", "GET").upper()
+
+    # Get the core handler
+    handler = create_endpoint_handler(category, tool_name, api, tool_data)
+
+    if method in ["GET", "DELETE"]:
+        # For GET/DELETE, create endpoint with query parameters
+        return create_get_delete_endpoint(handler, api, tool_name, api_name)
+    else:
+        # For POST/PUT/PATCH, create endpoint with body
+        return create_post_put_patch_endpoint(handler, api, tool_name, api_name)
+
+
+def sanitize_param_name(name: str) -> str:
+    """Convert parameter name to valid Python identifier.
+
+    This is necessary because API parameter names might:
+    - Contain hyphens, dots, or other special characters (e.g., "user-id", "api.key")
+    - Start with numbers (e.g., "3rd_party_id")
+    - Be Python reserved keywords (e.g., "class", "return")
+    - Conflict with FastAPI's special parameters
+
+    Args:
+        name: The original parameter name from the API
+
+    Returns:
+        A valid Python identifier that can be used as a function parameter
+    """
+    # Step 1: Replace all non-alphanumeric characters with underscores
+    # "user-id" → "user_id", "api.key" → "api_key"
+    sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", name)
+
+    # Step 2: Remove consecutive underscores for cleanliness
+    # "user__id" → "user_id"
+    sanitized = re.sub(r"_+", "_", sanitized)
+
+    # Step 3: Remove leading/trailing underscores
+    # "_user_id_" → "user_id"
+    sanitized = sanitized.strip("_")
+
+    # Step 4: Ensure it starts with a letter or underscore (Python requirement)
+    # "3rd_party" → "param_3rd_party"
+    if sanitized and sanitized[0].isdigit():
+        sanitized = f"param_{sanitized}"
+
+    # Step 5: Handle empty result (e.g., if original was just special chars like "***")
+    if not sanitized:
+        sanitized = "param"
+
+    # Step 6: Handle Python reserved keywords
+    # "class" → "class_param", "return" → "return_param"
+    if keyword.iskeyword(sanitized):
+        sanitized = f"{sanitized}_param"
+
+    # Step 7: Handle special FastAPI parameter names that would conflict
+    # "request" → "request_param" (since FastAPI injects Request object)
+    if sanitized in ["request", "response", "background_tasks", "dependencies"]:
+        sanitized = f"{sanitized}_param"
+
+    return sanitized
+
+
+def create_get_delete_endpoint(handler, api: dict, tool_name: str, api_name: str):
+    """Create GET/DELETE endpoint with query parameters.
+
+    For GET/DELETE requests, parameters come from the URL query string.
+    FastAPI needs to see these as function parameters to:
+    - Validate them
+    - Convert types (e.g., "123" → 123 for integers)
+    - Generate OpenAPI documentation
+
+    Args:
+        handler: The core request handler function
+        api: API definition with parameters
+        tool_name: Name of the tool (e.g., "RealEstate")
+        api_name: Name of the API endpoint (e.g., "searchProperties")
+    """
+
+    # Check if we have any parameters
+    has_params = bool(api.get("required_parameters") or api.get("optional_parameters"))
+
+    if not has_params:
+        # No parameters, create simple endpoint
+        async def endpoint(request: Request):
+            """Dynamic endpoint handler"""
+            return await handler(request, {})
+
+        endpoint.__name__ = f"{tool_name}_{api_name}"
+        endpoint.__doc__ = api.get(
+            "description", f"Execute {api['name']} from {tool_name}"
+        )
+        endpoint.__module__ = __name__
+        endpoint.__qualname__ = endpoint.__name__
+        return endpoint
+
+    # We need to dynamically create a function with the exact parameters the API expects.
+    # This is where code generation comes in - we're building Python code as a string
+    # that will create a function with the right signature.
+    #
+    # Example: If the API expects parameters "user-id" (required) and "limit" (optional),
+    # we'll generate:
+    #   async def endpoint(request: Request,
+    #                     user_id: str = Query(..., alias='user-id'),
+    #                     limit: Optional[int] = Query(10)):
+    #
+    # Start building the function signature
+    func_code = "async def endpoint(request: Request"
+
+    # Track parameter names to avoid duplicates
+    seen_params = set()
+    param_mapping = {}  # Map sanitized names to original names
+
+    # Process required parameters first
+    for param in api.get("required_parameters", []):
+        param_name = param.get("name", "")
+        if not param_name:
+            continue
+
+        # Convert "user-id" to "user_id" so it's a valid Python parameter name
+        sanitized_name = sanitize_param_name(param_name)
+
+        if sanitized_name in seen_params:
+            continue  # Skip duplicate parameter names
+        seen_params.add(sanitized_name)
+        param_mapping[sanitized_name] = param_name  # Remember: user_id → "user-id"
+
+        # Get the Python type for this parameter
+        param_type_obj, param_type_name = get_python_type(
+            param.get("type", "string"), is_query_param=True
+        )
+
+        # Prepare the description for use in generated code
+        # We need to escape special characters that would break the Python string
+        param_desc = param.get("description", "")
+        param_desc = param_desc.replace("\\", "\\\\")  # Escape backslashes first
+        param_desc = param_desc.replace('"', '\\"')  # Then escape quotes
+        param_desc = param_desc.replace("\n", " ")  # Replace newlines with spaces
+        param_desc = param_desc.replace("\r", " ")  # Replace carriage returns
+
+        # The 'alias' tells FastAPI to accept "user-id" in the URL but pass it as user_id
+        param_name_escaped = param_name.replace("'", "\\'")
+        func_code += f", {sanitized_name}: {param_type_name} = Query(..., alias='{param_name_escaped}', description=\"{param_desc}\")"
+
+    # Process optional parameters (same process but with default values)
+    for param in api.get("optional_parameters", []):
+        param_name = param.get("name", "")
+        if not param_name:
+            continue
+
+        # Convert parameter name to valid Python identifier
+        sanitized_name = sanitize_param_name(param_name)
+
+        if sanitized_name in seen_params:
+            continue  # Skip duplicate parameter names
+        seen_params.add(sanitized_name)
+        param_mapping[sanitized_name] = param_name
+
+        param_type_obj, param_type_name = get_python_type(
+            param.get("type", "string"), is_query_param=True
+        )
+        param_default = param.get("default", None)
+
+        # Prepare description (same escaping as required params)
+        param_desc = param.get("description", "")
+        param_desc = param_desc.replace("\\", "\\\\")  # Escape backslashes first
+        param_desc = param_desc.replace('"', '\\"')  # Then escape quotes
+        param_desc = param_desc.replace("\n", " ")  # Replace newlines with spaces
+        param_desc = param_desc.replace("\r", " ")  # Replace carriage returns
+
+        # Escape single quotes in parameter name for the alias
+        param_name_escaped = param_name.replace("'", "\\'")
+
+        # Optional parameters use Optional[type] and have a default value
+        if param_default is None:
+            func_code += f", {sanitized_name}: Optional[{param_type_name}] = Query(None, alias='{param_name_escaped}', description=\"{param_desc}\")"
+        else:
+            # repr() safely converts the default value to a Python literal
+            func_code += f", {sanitized_name}: Optional[{param_type_name}] = Query({repr(param_default)}, alias='{param_name_escaped}', description=\"{param_desc}\")"
+
+    # Complete the function signature and add the body
+    func_code += "):\n"
+    func_code += "    # Collect all parameters into a dictionary for the handler\n"
+    func_code += "    tool_input = {}\n"
+
+    # Generate code to collect parameters using their original names
+    # This maps from Python parameter names back to API parameter names
+    for sanitized_name, original_name in param_mapping.items():
+        func_code += f"    if {sanitized_name} is not None:\n"
+        func_code += f"        tool_input['{original_name}'] = {sanitized_name}\n"
+
+    func_code += "    return await handler(request, tool_input)\n"
+
+    # Now we execute the generated code to create the actual function
+    # We provide a namespace with all the imports and objects the code needs
+    namespace = {
+        "Request": Request,
+        "Query": Query,
+        "Optional": Optional,
+        "str": str,
+        "int": int,
+        "float": float,
+        "bool": bool,
+        "List": List,
+        "Dict": Dict,
+        "Any": Any,
+        "handler": handler,  # The actual handler that does the work
+    }
+
+    # This is where the magic happens - exec() runs our generated code
+    # and creates the function with the exact signature we built
+    exec(func_code, namespace)
+    endpoint = namespace["endpoint"]  # Get the function we just created
+
+    # Set metadata
     endpoint.__name__ = f"{tool_name}_{api_name}"
-    endpoint.__doc__ = api.get(
-        "description", f"Execute {api['name']} from {tool_data['tool_name']}"
-    )
+    endpoint.__doc__ = api.get("description", f"Execute {api['name']} from {tool_name}")
+    endpoint.__module__ = __name__
+    endpoint.__qualname__ = endpoint.__name__
+    endpoint.__module__ = __name__
+    endpoint.__qualname__ = endpoint.__name__
+
+    return endpoint
+
+
+def create_post_put_patch_endpoint(handler, api: dict, tool_name: str, api_name: str):
+    """Create POST/PUT/PATCH endpoint with request body.
+
+    For POST/PUT/PATCH requests, parameters come in the request body as JSON.
+    We create a Pydantic model to:
+    - Validate the JSON structure
+    - Convert types automatically
+    - Generate OpenAPI documentation
+
+    Args:
+        handler: The core request handler function
+        api: API definition with parameters
+        tool_name: Name of the tool
+        api_name: Name of the API endpoint
+    """
+
+    # Check if we have parameters to create a body model
+    has_params = bool(api.get("required_parameters") or api.get("optional_parameters"))
+
+    if has_params:
+        # We'll build a Pydantic model dynamically based on the API parameters
+        # This model will validate incoming JSON bodies
+        model_fields = {}
+        seen_params = set()
+
+        # Process required fields
+        for param in api.get("required_parameters", []):
+            param_name = param.get("name", "")
+            if not param_name or param_name in seen_params:
+                continue  # Skip empty or duplicate parameter names
+            seen_params.add(param_name)
+
+            param_type_obj, param_type_name = get_python_type(
+                param.get("type", "string"), is_query_param=False
+            )
+            # The ... means "required field" in Pydantic
+            model_fields[param_name] = (param_type_obj, ...)
+
+        # Process optional fields
+        for param in api.get("optional_parameters", []):
+            param_name = param.get("name", "")
+            if not param_name or param_name in seen_params:
+                continue  # Skip empty or duplicate parameter names
+            seen_params.add(param_name)
+
+            param_type_obj, param_type_name = get_python_type(
+                param.get("type", "string"), is_query_param=False
+            )
+            param_default = param.get("default", None)
+            # Optional fields have Optional[type] and a default value
+            model_fields[param_name] = (Optional[param_type_obj], param_default)
+
+        # Create a Pydantic model class dynamically
+        # This is like doing: class Request(BaseModel): name: str, age: Optional[int] = None
+        RequestModel = create_model(f"{tool_name}_{api_name}_Request", **model_fields)
+
+        # Create endpoint that uses the Pydantic model for validation
+        async def endpoint(request: Request, body: RequestModel):
+            """Dynamic endpoint handler with body"""
+            # Pydantic model's dict() method gives us the validated data
+            tool_input = body.dict()
+            return await handler(request, tool_input)
+
+    else:
+        # No parameters defined - accept any JSON body
+        # This is more flexible but provides no validation
+        async def endpoint(request: Request):
+            """Dynamic endpoint handler"""
+            try:
+                body = await request.json()
+                tool_input = body if isinstance(body, dict) else {}
+            except Exception:
+                tool_input = {}
+            return await handler(request, tool_input)
+
+    # Set metadata
+    endpoint.__name__ = f"{tool_name}_{api_name}"
+    endpoint.__doc__ = api.get("description", f"Execute {api['name']} from {tool_name}")
+    endpoint.__module__ = __name__
+    endpoint.__qualname__ = endpoint.__name__
 
     return endpoint
 
@@ -213,22 +539,30 @@ def setup_routes(toolenv_path: str):
                 method = api.get("method", "GET").upper()
 
                 # Create endpoint function
-                endpoint = create_rest_endpoint(category, tool_name, api, tool_data)
+                try:
+                    endpoint = create_rest_endpoint(category, tool_name, api, tool_data)
 
-                # Add route to FastAPI
-                if method == "GET":
-                    app.get(path)(endpoint)
-                elif method == "POST":
-                    app.post(path)(endpoint)
-                elif method == "PUT":
-                    app.put(path)(endpoint)
-                elif method == "DELETE":
-                    app.delete(path)(endpoint)
-                elif method == "PATCH":
-                    app.patch(path)(endpoint)
-                else:
-                    # Default to POST for unknown methods
-                    app.post(path)(endpoint)
+                    # Add route to FastAPI
+                    if method == "GET":
+                        app.get(path)(endpoint)
+                    elif method == "POST":
+                        app.post(path)(endpoint)
+                    elif method == "PUT":
+                        app.put(path)(endpoint)
+                    elif method == "DELETE":
+                        app.delete(path)(endpoint)
+                    elif method == "PATCH":
+                        app.patch(path)(endpoint)
+                    else:
+                        # Default to POST for unknown methods
+                        app.post(path)(endpoint)
+                except Exception as e:
+                    print(f"WARNING: Skipping route {path} ({method}):")
+                    print(f"  Tool: {tool_data.get('tool_name', 'unknown')}")
+                    print(f"  API: {api.get('name', 'unknown')}")
+                    print(f"  Error: {type(e).__name__}: {e}")
+                    # Skip this route and continue with others
+                    continue
 
                 route_count += 1
 
