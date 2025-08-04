@@ -16,7 +16,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "fastmcp @ git+https://github.com/jlowin/fastmcp.git",
+    "fastmcp>=2.11.0",
     "httpx>=0.26.0",
 ]
 
